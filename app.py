@@ -1,15 +1,19 @@
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+import os
 import requests
 import json
 from flask import Flask, jsonify, render_template
+from dotenv import load_dotenv
+
+load_dotenv()
+
+base_url = os.getenv(BASE_URL)
+markets_endpoint = os.getenv(MARKETS_ENDPOINT)
+whale_threshold = os.getenv(WHALE_THRESHOLD)
 
 # Flask
 app = Flask(__name__, template_folder="templates")
-
-BASE_URL = 'https://gamma-api.polymarket.com'
-MARKETS_ENDPOINT = '/markets'
 
 params = {
     'order': 'id',
@@ -18,11 +22,9 @@ params = {
     'limit': 100,
 }
 
-WHALE_THRESHOLD = 1000 # Buy/sell volume threshold
-
 def fetch_active_markets():
     try:
-        response = requests.get(BASE_URL + MARKETS_ENDPOINT, params=params)
+        response = requests.get(base_url + markets_endpoint, params=params)
         response.raise_for_status()
         markets = response.json()
     except requests.exceptions.HTTPError as http_err:
