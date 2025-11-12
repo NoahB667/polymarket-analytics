@@ -8,9 +8,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-base_url = os.getenv(BASE_URL)
-markets_endpoint = os.getenv(MARKETS_ENDPOINT)
-whale_threshold = os.getenv(WHALE_THRESHOLD)
+base_url = os.environ.get("BASE_URL")
+markets_endpoint = os.getenv("MARKETS_ENDPOINT")
+whale_threshold = os.getenv("WHALE_THRESHOLD")
 
 # Flask
 app = Flask(__name__, template_folder="templates")
@@ -45,6 +45,10 @@ def utc_to_est(utc_iso_str):
 def index():
     markets = fetch_active_markets()
     return render_template("index.html", markets=markets, utc_to_est=utc_to_est)
+
+@app.route('/markets')
+def markets():
+    return fetch_active_markets()
 
 if __name__ == '__main__':
     app.run(debug=True)
