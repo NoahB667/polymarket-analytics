@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-base_url = os.environ.get("BASE_URL")
+base_url = os.getenv("BASE_URL")
 markets_endpoint = os.getenv("MARKETS_ENDPOINT")
 whale_threshold = os.getenv("WHALE_THRESHOLD")
 
