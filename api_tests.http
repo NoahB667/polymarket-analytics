@@ -3,3 +3,10 @@ GET http://127.0.0.1:5000
 
 ###
 GET 127.0.0.1:5000/markets
+
+###
+GET 127.0.0.1:5000/events
+
+###
+GET 127.0.0.1:5000/markets/trump
+
