@@ -1,12 +1,15 @@
 ### GET request to example server
 GET http://127.0.0.1:5000
 
-###
+### List markets
 GET 127.0.0.1:5000/markets
 
-###
+### List events
 GET 127.0.0.1:5000/events
 
 ###
 GET 127.0.0.1:5000/markets/trump
+
+###
+GET 127.0.0.1:5000/markets/categories?tags=politics,geopolitics
 

@@ -1,0 +1,14 @@
+### List events
+GET https://gamma-api.polymarket.com/events
+
+### Get event by id
+GET https://gamma-api.polymarket.com/events/{id}
+
+### List markets
+GET https://gamma-api.polymarket.com/markets
+
+### Get market by id
+GET https://gamma-api.polymarket.com/markets/{id}
+
+
+

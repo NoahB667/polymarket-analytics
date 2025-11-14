@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 import os
 import requests
 import json
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
 import websockets
 import asyncio
@@ -22,7 +22,6 @@ params = {
     'order': 'id',
     'ascending': 'false',
     'closed': 'false',
-    'limit': 10,
 }
 
 def fetch_active_markets():
@@ -72,6 +71,16 @@ def fetch_trump_markets():
             trump_markets[market['id']] = market
     return trump_markets
 
+def filter_markets_by_tag_slugs(markets, desired_slugs):
+    desired = {s.lower() for s in desired_slugs}
+    filtered = []
+    for m in markets:
+        tags = m.get('tags', []) if isinstance(m, dict) else []
+        slugs = {t.get('slug', '').lower() for t in tags if isinstance(t, dict)}
+        if slugs & desired:  # intersection (OR logic)
+            filtered.append(m)
+    return filtered
+
 # Routes
 @app.route('/')
 def index():
@@ -90,6 +99,20 @@ def trump():
 @app.route('/events')
 def events():
     return fetch_active_events()
+
+@app.route('/markets/categories')
+def markets_by_categories():
+    # Query param example: /markets/categories?tags=politics,geopolitics
+    raw = request.args.get('tags', '')
+    if not raw:
+        return jsonify({'error': 'Provide tags query param, e.g. ?tags=politics,geopolitics'}), 400
+    desired_slugs = [s.strip() for s in raw.split(',') if s.strip()]
+    markets = fetch_active_markets()
+    # If error response came back, pass it through
+    if not isinstance(markets, list):
+        return markets
+    filtered = filter_markets_by_tag_slugs(markets, desired_slugs)
+    return jsonify(filtered)
 
 
 if __name__ == '__main__':
