@@ -13,3 +13,6 @@ GET 127.0.0.1:5000/markets/trump
 ###
 GET 127.0.0.1:5000/markets/categories?tags=politics,geopolitics
 
+###
+GET 127.0.0.1:5000/get-event/fed-decision-in-january
+

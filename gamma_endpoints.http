@@ -10,5 +10,8 @@ GET https://gamma-api.polymarket.com/markets
 ### Get market by id
 GET https://gamma-api.polymarket.com/markets/{id}
 
+### Get event id from slug
+GET https://gamma-api.polymarket.com/events/slug/fed-decision-in-january
+
 
 
