@@ -5,6 +5,9 @@ import requests
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
 import json
+import websockets
+import asyncio
+import datetime
 
 load_dotenv()
 
@@ -163,6 +166,54 @@ def get_event_details(slug):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+WATCHLIST = [
+    "11862165566757345985240476164489718219056735011698825377388402888080786399275",
+    "71478852790279095447182996049071040792010759617668969799049179229104800573786",
+    "92703761682322480664976766247614127878023988651992837287050266308961660624165",
+    "48193521645113703700467246669338225849301704920590102230072263970163239985027",
+    "112838095111461683880944516726938163688341306245473734071798778736646352193304",
+    "7321318078891059430231591636389479745928915782241484131001985601124919020061",
+    "16419649354067298412736919830777830730026677464626899811394461690794060330642",
+    "42139849929574046088630785796780813725435914859433767469767950066058132350666"
+]
+
+async def polymarket_websocket():
+    uri = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    last_time_pong = datetime.datetime.now()
+    messages = []
+    print("started")
+
+    subscribe_msg = {
+        "action": "subscribe",
+        "subscriptions": [
+            {
+                "assets_ids": WATCHLIST,
+                "type": "market"
+            }
+        ]
+    }
+    async with websockets.connect(uri) as websocket:
+        await websocket.send(json.dumps(subscribe_msg))
+        print(f"Subscribed to {len(WATCHLIST)} markets.")
+
+        while True:
+            try:
+                response = await websocket.recv()
+                if response != "PONG":
+                    last_time_pong = datetime.datetime.now()
+                data = json.loads(response)
+                # if data.get("topic") == "activity" and data.get("type") == "trades":
+                #     trade = data.get("payload", {})
+                print(data)
+                if last_time_pong + datetime.timedelta(seconds=5) < datetime.datetime.now():
+                    await websocket.send("PING")
+                else:
+                    messages.append(data)
+            except Exception as e:
+                print(f"Connection lost: {e}")
+                break
+
 
 if __name__ == '__main__':
-    app.run(debug=True, port=5000)
+    asyncio.run(polymarket_websocket())
+    # app.run(debug=True, port=5000)
