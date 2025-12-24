@@ -5,9 +5,8 @@ import requests
 from flask import Flask, jsonify, render_template, request
 from dotenv import load_dotenv
 import json
-import websockets
-import asyncio
 import datetime
+from WebSocketOrderBook import WebSocketOrderBook
 
 load_dotenv()
 
@@ -116,10 +115,10 @@ def markets_by_categories():
     filtered = filter_markets_by_tag_slugs(markets, desired_slugs)
     return jsonify(filtered)
 
-@app.route('/get-event/<slug>', methods=['GET'])
+@app.route('/get-event-details/<slug>', methods=['GET'])
 def get_event_details(slug):
     """
-    Endpoint to convert a human-readable slug into Polymarket Token IDs.
+    Endpoint to convert a human-readable slug into Polymarket details.
     Example: http://127.0.0.1:5000/get-event/will-bitcoin-hit-100k
     """
     gamma_url = f"https://gamma-api.polymarket.com/events?slug={slug}"
@@ -165,6 +164,77 @@ def get_event_details(slug):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+@app.route('/get-token-ids/<slug>', methods=['GET'])
+def get_token_ids(slug):
+    """
+    Endpoint to convert a human-readable slug into Polymarket Token IDs.
+    Example: http://127.0.0.1:5000/get-event/will-bitcoin-hit-100k
+    """
+    gamma_url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+
+    try:
+        response = requests.get(gamma_url, timeout=10)
+        response.raise_for_status()  # Check for HTTP errors
+        data = response.json()
+        if not data:
+            return jsonify({"error": "Event slug not found"}), 404
+
+        # Extracting the core data for your Whale Tracker
+        event = data[0]
+        all_token_ids = []
+
+        for market in event.get('markets', []):
+            token_ids = market.get('clobTokenIds')
+            parsed = []
+
+            if token_ids is None:
+                parsed = []
+            elif isinstance(token_ids, (list, tuple)):
+                parsed = [str(x) for x in token_ids]
+            else:
+                if isinstance(token_ids, str):
+                    s = token_ids.strip()
+                    try:
+                        decoded = json.loads(s)
+                        if isinstance(decoded, (list, tuple)):
+                            parsed = [str(x) for x in decoded]
+                        else:
+                            parsed = [str(decoded)]
+                    except Exception:
+                        s = s.strip('[]')
+                        parsed = [part.strip().strip('"').strip("'") for part in s.split(',') if part.strip()]
+                else:
+                    parsed = [str(token_ids)]
+
+            all_token_ids.extend(parsed)
+
+        return jsonify(all_token_ids), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+import threading
+
+@app.route('/get-live-trades/<slug>')
+def get_live_trades(slug):
+    token_response, status_code = get_token_ids(slug)
+    if status_code != 200:
+        return token_response, status_code
+
+    assets_ids = token_response.get_json()
+
+    def run_websocket():
+        url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+        market_connection = WebSocketOrderBook(
+            "market", url, assets_ids, None, True
+        )
+        market_connection.run()
+
+    thread = threading.Thread(target=run_websocket)
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({"message": f"Started listening for live trades for {slug}"}), 200
 
 WATCHLIST = [
     "11862165566757345985240476164489718219056735011698825377388402888080786399275",
@@ -177,43 +247,6 @@ WATCHLIST = [
     "42139849929574046088630785796780813725435914859433767469767950066058132350666"
 ]
 
-async def polymarket_websocket():
-    uri = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-    last_time_pong = datetime.datetime.now()
-    messages = []
-    print("started")
-
-    subscribe_msg = {
-        "action": "subscribe",
-        "subscriptions": [
-            {
-                "assets_ids": WATCHLIST,
-                "type": "market"
-            }
-        ]
-    }
-    async with websockets.connect(uri) as websocket:
-        await websocket.send(json.dumps(subscribe_msg))
-        print(f"Subscribed to {len(WATCHLIST)} markets.")
-
-        while True:
-            try:
-                response = await websocket.recv()
-                if response != "PONG":
-                    last_time_pong = datetime.datetime.now()
-                data = json.loads(response)
-                # if data.get("topic") == "activity" and data.get("type") == "trades":
-                #     trade = data.get("payload", {})
-                print(data)
-                if last_time_pong + datetime.timedelta(seconds=5) < datetime.datetime.now():
-                    await websocket.send("PING")
-                else:
-                    messages.append(data)
-            except Exception as e:
-                print(f"Connection lost: {e}")
-                break
-
 
 if __name__ == '__main__':
-    asyncio.run(polymarket_websocket())
-    # app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000)
