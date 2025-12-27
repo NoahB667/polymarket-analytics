@@ -1,119 +1,30 @@
-from datetime import datetime
-from zoneinfo import ZoneInfo
 import os
+import threading
+import asyncio
 import requests
 from flask import Flask, jsonify, render_template, request
+from telegram import Bot
 from dotenv import load_dotenv
 import json
-import datetime
 from WebSocketOrderBook import WebSocketOrderBook
 
 load_dotenv()
-
-base_url = os.getenv("BASE_URL")
-markets_endpoint = os.getenv("MARKETS_ENDPOINT")
-events_endpoint = os.getenv("EVENTS_ENDPOINT")
-whale_threshold = os.getenv("WHALE_THRESHOLD")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Flask
-app = Flask(__name__, template_folder="templates")
+app = Flask(__name__)
 
-params = {
-    'order': 'id',
-    'ascending': 'false',
-    'closed': 'false',
-    'limit': '20'
-}
-
-def fetch_active_markets():
+def send_telegram_alert(chat_id, message):
+    if not BOT_TOKEN or not chat_id:
+        return
     try:
-        response = requests.get(base_url + markets_endpoint, params=params)
-        response.raise_for_status()
-        markets = response.json()
-    except requests.exceptions.HTTPError as http_err:
-        return jsonify({'error': f'HTTP error occurred: {http_err}'}), 500
-    except Exception as err:
-        return jsonify({'error': f'Other error occurred: {err}'}), 500
-    return markets
-
-def fetch_active_events():
-    try:
-        response = requests.get(base_url + events_endpoint, params=params)
-        response.raise_for_status()
-        events = response.json()
-    except requests.exceptions.HTTPError as http_err:
-        return jsonify({'error': f'HTTP error occurred: {http_err}'}), 500
-    except Exception as err:
-        return jsonify({'error': f'Other error occurred: {err}'}), 500
-    return events
-
-def utc_to_est(utc_iso_str):
-    if not utc_iso_str:
-        return "N/A"
-    try:
-        s = str(utc_iso_str).strip()
-        # Normalize Z to +00:00 so fromisoformat can parse it
-        if s.endswith('Z'):
-            s = s[:-1] + '+00:00'
-        dt = datetime.fromisoformat(s)
-        # If naive (no tzinfo), assume UTC
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        est_time = dt.astimezone(ZoneInfo("US/Eastern"))
-        return est_time.strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return "N/A"
-
-def fetch_trump_markets():
-    response = fetch_active_markets()
-    trump_markets = {}
-    for market in response:
-        if 'Trump' in market.get('data', {}).get('title', ''):
-            trump_markets[market['id']] = market
-    return trump_markets
-
-def filter_markets_by_tag_slugs(markets, desired_slugs):
-    desired = {s.lower() for s in desired_slugs}
-    filtered = []
-    for m in markets:
-        tags = m.get('tags', []) if isinstance(m, dict) else []
-        slugs = {t.get('slug', '').lower() for t in tags if isinstance(t, dict)}
-        if slugs & desired:  # intersection (OR logic)
-            filtered.append(m)
-    return filtered
-
-# Routes
-@app.route('/')
-def index():
-    markets = fetch_active_markets()
-    return render_template("index.html", markets=markets, utc_to_est=utc_to_est)
-
-@app.route('/markets')
-def markets():
-    markets = fetch_active_markets()
-    return render_template("index.html", markets=markets, utc_to_est=utc_to_est)
-
-@app.route('/markets/trump')
-def trump():
-    return fetch_trump_markets()
-
-@app.route('/events')
-def events():
-    return fetch_active_events()
-
-@app.route('/markets/categories')
-def markets_by_categories():
-    # Query param example: /markets/categories?tags=politics,geopolitics
-    raw = request.args.get('tags', '')
-    if not raw:
-        return jsonify({'error': 'Provide tags query param, e.g. ?tags=politics,geopolitics'}), 400
-    desired_slugs = [s.strip() for s in raw.split(',') if s.strip()]
-    markets = fetch_active_markets()
-    # If error response came back, pass it through
-    if not isinstance(markets, list):
-        return markets
-    filtered = filter_markets_by_tag_slugs(markets, desired_slugs)
-    return jsonify(filtered)
+        bot = Bot(token=BOT_TOKEN)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(bot.send_message(chat_id, message))
+        loop.close()
+    except Exception as e:
+        print(f"Failed to send alert: {e}")
 
 @app.route('/get-event-details/<slug>', methods=['GET'])
 def get_event_details(slug):
@@ -164,6 +75,7 @@ def get_event_details(slug):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 @app.route('/get-token-ids/<slug>', methods=['GET'])
 def get_token_ids(slug):
     """
@@ -213,20 +125,23 @@ def get_token_ids(slug):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-import threading
-
 @app.route('/get-live-trades/<slug>')
 def get_live_trades(slug):
+    chat_id = request.args.get('chat_id')
     token_response, status_code = get_token_ids(slug)
     if status_code != 200:
         return token_response, status_code
 
     assets_ids = token_response.get_json()
 
+    def on_trade_callback(message_text):
+        if chat_id:
+            send_telegram_alert(chat_id, message_text)
+
     def run_websocket():
         url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
         market_connection = WebSocketOrderBook(
-            "market", url, assets_ids, None, True
+            "market", url, assets_ids, on_trade_callback(), True
         )
         market_connection.run()
 
@@ -234,7 +149,10 @@ def get_live_trades(slug):
     thread.daemon = True
     thread.start()
 
-    return jsonify({"message": f"Started listening for live trades for {slug}"}), 200
+    return jsonify({
+        "message": f"Started listening for live trades for {slug}",
+        "recipient": chat_id or "Console only"
+    }), 200
 
 WATCHLIST = [
     "11862165566757345985240476164489718219056735011698825377388402888080786399275",

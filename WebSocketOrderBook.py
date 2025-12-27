@@ -30,6 +30,12 @@ class WebSocketOrderBook:
                     event_type = msg.get("event_type")
                     if event_type in ["last_trade_price"]:
                         print(json.dumps(msg, indent=2))
+                        if self.message_callback:
+                            price = msg.get("price", "?")
+                            size = msg.get("size", "?")
+                            side = msg.get("side", "?")
+                            text = f"Trade: {side} @ {price} ({size})"
+                            self.message_callback(text)
 
         except json.JSONDecodeError:
             print(f"Received non-JSON message: {message}")
