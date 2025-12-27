@@ -34,7 +34,8 @@ class WebSocketOrderBook:
                             price = msg.get("price", "?")
                             size = msg.get("size", "?")
                             side = msg.get("side", "?")
-                            text = f"Trade: {side} @ {price} ({size})"
+                            usd = float(size) * float(price)
+                            text = f"Trade: {side} @ {price} ({usd:.2f}$)"
                             self.message_callback(text)
 
         except json.JSONDecodeError:
@@ -75,19 +76,3 @@ class WebSocketOrderBook:
     def run(self):
         self.ws.run_forever()
 
-if __name__ == "__main__":
-    url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-    assets_ids = [
-            "11862165566757345985240476164489718219056735011698825377388402888080786399275",
-            "71478852790279095447182996049071040792010759617668969799049179229104800573786",
-            "92703761682322480664976766247614127878023988651992837287050266308961660624165",
-            "48193521645113703700467246669338225849301704920590102230072263970163239985027",
-            "112838095111461683880944516726938163688341306245473734071798778736646352193304",
-            "7321318078891059430231591636389479745928915782241484131001985601124919020061",
-            "16419649354067298412736919830777830730026677464626899811394461690794060330642",
-            "42139849929574046088630785796780813725435914859433767469767950066058132350666"
-    ]
-    market_connection = WebSocketOrderBook(
-        MARKET_CHANNEL, url, assets_ids, None, True
-    )
-    market_connection.run()

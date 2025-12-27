@@ -97,7 +97,5 @@ def main():
     print('Polling')
     app.run_polling()
 
-    # app.run_webhook(self=, listen=, port=5000, url_path=)
-
 if __name__ == '__main__':
     main()
