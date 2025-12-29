@@ -30,12 +30,13 @@ def get_outcome(market, asset_id):
         return f"Error: {str(e)}"
 
 class WebSocketOrderBook:
-    def __init__(self, channel_type, url, data, message_callback, verbose):
+    def __init__(self, channel_type, url, data, message_callback, verbose, min_size_usd=0):
         self.channel_type = channel_type
         self.url = url
         self.data = data
         self.message_callback = message_callback
         self.verbose = verbose
+        self.min_size_usd = float(min_size_usd)
         self.ws = WebSocketApp(
             url=self.url,
             on_message=self.on_message,
@@ -55,12 +56,16 @@ class WebSocketOrderBook:
                     if event_type in ["last_trade_price"]:
                         print(json.dumps(msg, indent=2))
                         if self.message_callback:
+                            price = msg.get("price", "0")
+                            size = msg.get("size", "0")
+                            usd = float(size) * float(price)
+
+                            if usd < self.min_size_usd:
+                                continue
+
                             question = get_question(msg.get("market"))
                             outcome = get_outcome(msg.get("market"), msg.get("asset_id"))
-                            price = msg.get("price", "?")
-                            size = msg.get("size", "?")
                             side = msg.get("side", "?")
-                            usd = float(size) * float(price)
                             text = f"{side} @ {price} ({usd:.2f}$), {question} {outcome}"
                             self.message_callback(text)
 

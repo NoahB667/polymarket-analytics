@@ -123,8 +123,9 @@ def get_token_ids(slug):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/get-live-trades/<slug>')
-def get_live_trades(slug):
+@app.route('/get-live-trades/<slug>', defaults={'limit': 0})
+@app.route('/get-live-trades/<slug>/<limit>')
+def get_live_trades(slug, limit):
     chat_id = request.args.get('chat_id')
     token_response, status_code = get_token_ids(slug)
     if status_code != 200:
@@ -139,7 +140,7 @@ def get_live_trades(slug):
     def run_websocket():
         url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
         market_connection = WebSocketOrderBook(
-            "market", url, assets_ids, on_trade_callback, True
+            "market", url, assets_ids, on_trade_callback, True, min_size_usd=limit
         )
         market_connection.run()
 
@@ -148,7 +149,7 @@ def get_live_trades(slug):
     thread.start()
 
     return jsonify({
-        "message": f"Started listening for live trades for {slug}",
+        "message": f"Started listening for live trades for {slug} with limit {limit}",
         "recipient": chat_id or "Console only"
     }), 200
 

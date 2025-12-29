@@ -25,15 +25,27 @@ async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /track <slug>")
+        await update.message.reply_text("Usage: /track <slug> [min_usd_size]")
         return
 
     slug = context.args[0]
+    limit = 0
+    if len(context.args) > 1:
+        try:
+            limit = float(context.args[1])
+        except ValueError:
+            await update.message.reply_text("Invalid limit value. Please provide a number.")
+            return
+
     chat_id = update.effective_chat.id
-    await update.message.reply_text(f"Connecting to market: {slug}")
+    await update.message.reply_text(f"Connecting to market: {slug} with limit > ${limit}")
 
     try:
-        url = f"{FLASK_API_URL}/get-live-trades/{slug}"
+        if limit > 0:
+            url = f"{FLASK_API_URL}/get-live-trades/{slug}/{limit}"
+        else:
+            url = f"{FLASK_API_URL}/get-live-trades/{slug}"
+
         params = {'chat_id': chat_id}
         response = requests.get(url, params, timeout=5)
         if response.status_code == 200:
