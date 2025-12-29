@@ -36,12 +36,11 @@ def get_event_details(slug):
 
     try:
         response = requests.get(gamma_url, timeout=10)
-        response.raise_for_status()  # Check for HTTP errors
+        response.raise_for_status()
         data = response.json()
         if not data:
             return jsonify({"error": "Event slug not found"}), 404
 
-        # Extracting the core data for your Whale Tracker
         event = data[0]
         market_info = []
 
@@ -86,12 +85,11 @@ def get_token_ids(slug):
 
     try:
         response = requests.get(gamma_url, timeout=10)
-        response.raise_for_status()  # Check for HTTP errors
+        response.raise_for_status()
         data = response.json()
         if not data:
             return jsonify({"error": "Event slug not found"}), 404
 
-        # Extracting the core data for your Whale Tracker
         event = data[0]
         all_token_ids = []
 

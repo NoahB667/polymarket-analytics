@@ -1,9 +1,33 @@
+import requests
 from websocket import WebSocketApp
 import json
 import time
 import threading
 
 MARKET_CHANNEL = "market"
+
+def get_question(market):
+    url = f"https://clob.polymarket.com/markets/{market}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("question", "N/A")
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+def get_outcome(market, asset_id):
+    url = f"https://clob.polymarket.com/markets/{market}"
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        for token in data.get("tokens", []):
+            if asset_id == token.get("token_id"):
+                return token.get("outcome", "N/A")
+        return "Outcome not found"
+    except Exception as e:
+        return f"Error: {str(e)}"
 
 class WebSocketOrderBook:
     def __init__(self, channel_type, url, data, message_callback, verbose):
@@ -31,11 +55,13 @@ class WebSocketOrderBook:
                     if event_type in ["last_trade_price"]:
                         print(json.dumps(msg, indent=2))
                         if self.message_callback:
+                            question = get_question(msg.get("market"))
+                            outcome = get_outcome(msg.get("market"), msg.get("asset_id"))
                             price = msg.get("price", "?")
                             size = msg.get("size", "?")
                             side = msg.get("side", "?")
                             usd = float(size) * float(price)
-                            text = f"Trade: {side} @ {price} ({usd:.2f}$)"
+                            text = f"{side} @ {price} ({usd:.2f}$), {question} {outcome}"
                             self.message_callback(text)
 
         except json.JSONDecodeError:
@@ -75,4 +101,3 @@ class WebSocketOrderBook:
 
     def run(self):
         self.ws.run_forever()
-
