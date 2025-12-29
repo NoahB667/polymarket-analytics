@@ -2,7 +2,7 @@ import os
 import requests
 from dotenv import load_dotenv
 from typing import Final
-from telegram import Update, Bot
+from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 load_dotenv()
@@ -15,7 +15,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Welcome to the Polymarket live trades bot! I will notify you whenever there is high trade volume activity! Use /track <slug> to start receiving alerts.')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('(directory of commands coming soon)')
+    await update.message.reply_text('Commands:\n/track <slug> [limit] - Start tracking\n/untrack <slug> - Stop tracking')
 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Live trades webhook has been stopped.')
@@ -55,6 +55,27 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"Failed to reach API: {e}")
 
+async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("Usage: /untrack <slug>")
+        return
+
+    slug = context.args[0]
+    chat_id = update.effective_chat.id
+
+    url = f"{FLASK_API_URL}/untrack/{slug}"
+    params = {'chat_id': chat_id}
+
+    try:
+        response = requests.get(url, params=params, timeout=5)
+        if response.status_code == 200:
+             await update.message.reply_text(f"Stopped tracking: {slug}")
+        elif response.status_code == 404:
+             await update.message.reply_text(f"You are not currently tracking: {slug}")
+        else:
+             await update.message.reply_text(f"Error: {response.text}")
+    except Exception as e:
+        await update.message.reply_text(f"Failed to reach API: {e}")
 
 # Responses
 def handle_response(text: str) -> str:
@@ -95,6 +116,7 @@ def main():
     # Commands
     app.add_handler(CommandHandler('start', start_command))
     app.add_handler(CommandHandler('track', track_command))
+    app.add_handler(CommandHandler('untrack', untrack_command))
     app.add_handler(CommandHandler('help', help_command))
     app.add_handler(CommandHandler('stop', stop_command))
     app.add_handler(CommandHandler('resume', resume_command))

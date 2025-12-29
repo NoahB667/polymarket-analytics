@@ -11,8 +11,9 @@ from WebSocketOrderBook import WebSocketOrderBook
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# Flask
 app = Flask(__name__)
+
+active_listeners = {}
 
 def send_telegram_alert(chat_id, message):
     if not BOT_TOKEN or not chat_id:
@@ -137,12 +138,23 @@ def get_live_trades(slug, limit):
         if chat_id:
             send_telegram_alert(chat_id, message_text)
 
+    listener_key = f"{chat_id}_{slug}"
+    if listener_key in active_listeners:
+        try:
+            active_listeners[listener_key].close()
+        except Exception:
+            pass
+        del active_listeners[listener_key]
+
+    url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    market_connection = WebSocketOrderBook(
+        "market", url, assets_ids, on_trade_callback, True, min_size_usd=limit
+    )
+    active_listeners[listener_key] = market_connection
     def run_websocket():
-        url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-        market_connection = WebSocketOrderBook(
-            "market", url, assets_ids, on_trade_callback, True, min_size_usd=limit
-        )
         market_connection.run()
+        if listener_key in active_listeners and active_listeners[listener_key] == market_connection:
+            del active_listeners[listener_key]
 
     thread = threading.Thread(target=run_websocket)
     thread.daemon = True
@@ -152,6 +164,25 @@ def get_live_trades(slug, limit):
         "message": f"Started listening for live trades for {slug} with limit {limit}",
         "recipient": chat_id or "Console only"
     }), 200
+
+@app.route('/untrack/<slug>', methods=['GET'])
+def untrack_market(slug):
+    chat_id = request.args.get('chat_id')
+    if not chat_id:
+        return jsonify({"error": "chat_id is required"}), 400
+
+    listener_key = f"{chat_id}_{slug}"
+
+    if listener_key in active_listeners:
+        try:
+            active_listeners[listener_key].close()
+            if listener_key in active_listeners:
+                del active_listeners[listener_key]
+            return jsonify({"message": f"Stopped tracking {slug}"}), 200
+        except Exception as e:
+            return jsonify({"error": f"Error stopping track: {str(e)}"}), 500
+    else:
+        return jsonify({"message": f"Not currently tracking {slug}"}), 404
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

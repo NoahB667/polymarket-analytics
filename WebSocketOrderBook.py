@@ -40,8 +40,6 @@ class WebSocketOrderBook:
         self.ws = WebSocketApp(
             url=self.url,
             on_message=self.on_message,
-            on_error=self.on_error,
-            on_close=self.on_close,
             on_open=self.on_open,
         )
         self.orderbooks = {}
@@ -74,35 +72,28 @@ class WebSocketOrderBook:
         except Exception as e:
             print(f"Error processing message: {e}")
 
-    def on_error(self, ws, error):
-        print("Error: ", error)
-        exit(1)
-
-    def on_close(self, ws, close_status_code, close_msg):
-        print("closing")
-        exit(0)
-
     def on_open(self, ws):
         if self.channel_type == MARKET_CHANNEL:
             ws.send(json.dumps({"assets_ids": self.data, "type": MARKET_CHANNEL}))
         else:
-            exit(1)
+            self.ws.close()
+            return
 
         thr = threading.Thread(target=self.ping, args=(ws,))
         thr.start()
 
-    def subscribe_to_tokens_ids(self, assets_ids):
-        if self.channel_type == MARKET_CHANNEL:
-            self.ws.send(json.dumps({"assets_ids": assets_ids, "operation": "subscribe"}))
-
-    def unsubscribe_to_tokens_ids(self, assets_ids):
-        if self.channel_type == MARKET_CHANNEL:
-            self.ws.send(json.dumps({"assets_ids": assets_ids, "operation": "unsubscribe"}))
-
     def ping(self, ws):
-        while True:
-            ws.send("PING")
-            time.sleep(5)
+        while self.ws.sock and self.ws.sock.connected:
+            try:
+                ws.send("PING")
+                time.sleep(5)
+            except Exception:
+                break
 
     def run(self):
         self.ws.run_forever()
+
+    def close(self):
+        if self.ws:
+            self.ws.close()
+
