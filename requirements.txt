@@ -1,8 +1,6 @@
-Flask==2.3.3
-Flask-SQLAlchemy==3.0.5
-Flask-Migrate==4.0.4
-psycopg2-binary==2.9.9
-python-dotenv==1.0.0
-requests==2.32.4
-asyncio===3.4.3
-websockets==11.0.3
+Flask==3.1.2
+python-dotenv==1.2.1
+python-telegram-bot==22.5
+requests==2.32.5
+websocket==0.2.1
+websocket-client==1.9.0
