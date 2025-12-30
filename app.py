@@ -247,4 +247,5 @@ if __name__ == '__main__':
             print(f"Restarting tracker for {sub.slug} (Chat: {sub.chat_id})")
             start_listener(sub.chat_id, sub.slug, sub.limit_usd)
 
-    app.run(debug=True, host='0.0.0.0', port=8000)
+    is_debug = os.getenv("FLASK_DEBUG", "False").lower() in ("true", "1", "t")
+    app.run(debug=is_debug, host='0.0.0.0', port=8000)
