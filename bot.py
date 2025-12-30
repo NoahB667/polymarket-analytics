@@ -17,12 +17,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('Commands:\n/track <slug> [limit] - Start tracking\n/untrack <slug> - Stop tracking')
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Live trades webhook has been stopped.')
-
-async def resume_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Live trades resumed!')
-
 async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: /track <slug> [min_usd_size]")
@@ -118,8 +112,6 @@ def main():
     app.add_handler(CommandHandler('track', track_command))
     app.add_handler(CommandHandler('untrack', untrack_command))
     app.add_handler(CommandHandler('help', help_command))
-    app.add_handler(CommandHandler('stop', stop_command))
-    app.add_handler(CommandHandler('resume', resume_command))
 
     # Messages
     app.add_handler(MessageHandler(filters.TEXT, handle_message))
