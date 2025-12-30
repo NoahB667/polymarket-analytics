@@ -1,26 +1,37 @@
-version: "3.9"
+version: "3.8"
+
 services:
-  web:
+  flask_api:
     build: .
+    container_name: polymarket_api
+    command: python app.py
     ports:
-        - "5000:5000"
-    env_file: .env
-    depends_on:
-      - db
-    volumes:
-      - .:/app
-  db:
-    image: postgres:15
-    container_name: polydb
-    restart: always
+      - "5000:5000"
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: pass
-      POSTGRES_DB: polydb
-    ports:
-      - "5432:5432"
+      - BOT_TOKEN=${BOT_TOKEN}
+    restart: always
+  telegram_bot:
+    build: .
+    container_name: polymarket_bot
+    command: python bot.py
+    depends_on:
+      - flask_api
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - FLASK_API_URL=http://flask_api:5000
+    restart: always
+  db:
+    image: postgres:15-alpine
+    container_name: polymarket_db
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=polymarket
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    restart: always
+    ports:
+      - "5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
       interval: 10s
