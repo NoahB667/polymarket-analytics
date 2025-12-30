@@ -11,10 +11,10 @@ BOT_USERNAME: Final = '@polymarket_live_trades_bot'
 FLASK_API_URL = os.getenv("FLASK_API_URL", "http://127.0.0.1:5000")
 
 # Commands
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update):
     await update.message.reply_text('Welcome to the Polymarket live trades bot! I will notify you whenever there is high trade volume activity! Use /track <slug> to start receiving alerts.')
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_command(update: Update):
     await update.message.reply_text('Commands:\n/track <slug> [limit] - Start tracking\n/untrack <slug> - Stop tracking')
 
 async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -79,7 +79,7 @@ def handle_response(text: str) -> str:
     else:
         return 'If you are lost, please type: /help'
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_message(update: Update):
     message_type: str = update.message.chat.type
     text: str = update.message.text
 

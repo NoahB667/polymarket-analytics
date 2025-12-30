@@ -87,8 +87,8 @@ class WebSocketOrderBook:
             try:
                 ws.send("PING")
                 time.sleep(5)
-            except Exception:
-                break
+            except Exception as e:
+                print(f"Ping error: {e}")
 
     def run(self):
         self.ws.run_forever()
@@ -96,4 +96,3 @@ class WebSocketOrderBook:
     def close(self):
         if self.ws:
             self.ws.close()
-

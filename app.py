@@ -2,7 +2,7 @@ import os
 import threading
 import asyncio
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, request
 from telegram import Bot
 from dotenv import load_dotenv
 import json
@@ -48,7 +48,6 @@ def get_event_details(slug):
         for market in event.get('markets', []):
             question = market.get("question") or "N/A"
             token_ids = market.get('clobTokenIds')
-            parsed = []
 
             if token_ids is None:
                 parsed = []
@@ -96,7 +95,6 @@ def get_token_ids(slug):
 
         for market in event.get('markets', []):
             token_ids = market.get('clobTokenIds')
-            parsed = []
 
             if token_ids is None:
                 parsed = []
@@ -142,8 +140,8 @@ def get_live_trades(slug, limit):
     if listener_key in active_listeners:
         try:
             active_listeners[listener_key].close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Error closing existing listener: {e}")
         del active_listeners[listener_key]
 
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
