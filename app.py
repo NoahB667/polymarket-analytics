@@ -85,6 +85,10 @@ def get_token_ids(slug):
     except Exception as e:
         return None, str(e)
 
+@app.route('/')
+def health_check():
+    return jsonify({"status": "healthy", "service": "polymarket-analytics-api"}), 200
+
 @app.route('/get-event-details/<slug>', methods=['GET'])
 def get_event_details(slug):
     """
