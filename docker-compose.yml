@@ -6,9 +6,13 @@ services:
     container_name: polymarket_api
     command: python app.py
     ports:
-      - "5000:5000"
+      - "8000:8000"
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - DATABASE_URL=postgresql://postgres:pass@db:5432/polydb
+    depends_on:
+      db:
+        condition: service_healthy
     restart: always
   telegram_bot:
     build: .
@@ -18,7 +22,7 @@ services:
       - flask_api
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - FLASK_API_URL=http://flask_api:5000
+      - FLASK_API_URL=http://flask_api:8000
     restart: always
   db:
     image: postgres:15-alpine
@@ -26,7 +30,7 @@ services:
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=pass
-      - POSTGRES_DB=polymarket
+      - POSTGRES_DB=polydb
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: always

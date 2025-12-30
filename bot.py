@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME: Final = '@polymarket_live_trades_bot'
-FLASK_API_URL = os.getenv("FLASK_API_URL", "http://127.0.0.1:5000")
+FLASK_API_URL = os.getenv("FLASK_API_URL", "http://127.0.0.1:8000")
 
 # Commands
 async def start_command(update: Update):
