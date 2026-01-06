@@ -65,7 +65,7 @@ class WebSocketOrderBook:
                             outcome = get_outcome(msg.get("market"), msg.get("asset_id"))
                             side = msg.get("side", "?")
                             text = f"{side} @ {price} ({usd:.2f}$), {question} {outcome}"
-                            self.message_callback(text)
+                            self.message_callback(text, usd)
 
         except json.JSONDecodeError:
             print(f"Received non-JSON message: {message}")

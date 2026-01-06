@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 BOT_USERNAME: Final = '@polymarket_live_trades_bot'
-FLASK_API_URL = os.getenv("FLASK_API_URL", "http://127.0.0.1:8000")
+FASTAPI_URL = os.getenv("FASTAPI_URL", "http://127.0.0.1:8000")
 
 # Commands
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -36,9 +36,9 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         if limit > 0:
-            url = f"{FLASK_API_URL}/get-live-trades/{slug}/{limit}"
+            url = f"{FASTAPI_URL}/get-live-trades/{slug}/{limit}"
         else:
-            url = f"{FLASK_API_URL}/get-live-trades/{slug}"
+            url = f"{FASTAPI_URL}/get-live-trades/{slug}"
 
         params = {'chat_id': chat_id}
         response = requests.get(url, params, timeout=5)
@@ -57,7 +57,7 @@ async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     slug = context.args[0]
     chat_id = update.effective_chat.id
 
-    url = f"{FLASK_API_URL}/untrack/{slug}"
+    url = f"{FASTAPI_URL}/untrack/{slug}"
     params = {'chat_id': chat_id}
 
     try:

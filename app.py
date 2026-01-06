@@ -10,11 +10,14 @@ from sqlalchemy import create_engine, Column, Integer, String, Float, UniqueCons
 from sqlalchemy.orm import sessionmaker, Session, declarative_base
 from telegram import Bot
 from dotenv import load_dotenv
+import redis
+from typing import Dict
 
 from WebSocketOrderBook import WebSocketOrderBook
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # Database config
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polymarket.db")
@@ -30,8 +33,12 @@ class Subscription(Base):
     limit_usd = Column(Float, default=0.0)
     __table_args__ = (UniqueConstraint('chat_id', 'slug', name='_chat_slug_uc'),)
 
-# In memory state (needed for active WebSocket connections)
-active_listeners = {}
+# Redis Client
+r = redis.from_url(REDIS_URL, decode_responses=True)
+
+# In memory state for active WebSocket connections (Key: slug, Value: WebSocketOrderBook)
+# Deduplicates connections.
+market_streams: Dict[str, WebSocketOrderBook] = {}
 
 def get_db():
     db = SessionLocal()
@@ -90,37 +97,49 @@ def get_token_ids(slug):
     except Exception as e:
         return None, str(e)
 
-def start_listener(chat_id, slug, limit):
+def ensure_market_stream(slug):
+    """
+    Ensures a WebSocket connection exists for the given slug
+    If it exists, does nothing. If not, starts it.
+    """
+    if slug in market_streams:
+        return True, "Stream already active"
+
     assets_ids, error = get_token_ids(slug)
     if error:
         print(f"Could not start listener for {slug}: {error}")
         return False, error
 
-    def on_trade_callback(message_text):
-        if chat_id:
-            send_telegram_alert(chat_id, message_text)
-
-    listener_key = f"{chat_id}_{slug}"
-
-    # Close existing listener key if present
-    if listener_key in active_listeners:
+    # Callback now handles all users for this slug
+    def on_trade_callback(message_text, trade_value):
+        # Redis Key: subscriptions:{slug} -> Hash { chat_id: limit_usd }
         try:
-            active_listeners[listener_key].close()
+            subscribers = r.hgetall(f"subscriptions:{slug}")
+            for chat_id, limit in subscribers.items():
+                try:
+                    user_limit = float(limit)
+                    if trade_value >= user_limit:
+                        send_telegram_alert(chat_id, message_text)
+                except ValueError:
+                    continue
         except Exception as e:
-            print(f"Error closing existing listener: {e}")
-        del active_listeners[listener_key]
+            print(f"Error accessing redis in callback: {e}")
 
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+
+    # Set min_size_usd=0 so socket gets everything
+    # Filter per-user inside callback
     market_connection = WebSocketOrderBook(
-        "market", url, assets_ids, on_trade_callback, True, min_size_usd=limit
+        "market", url, assets_ids, on_trade_callback, True, min_size_usd=0
     )
 
-    active_listeners[listener_key] = market_connection
+    market_streams[slug] = market_connection
 
     def run_websocket():
         market_connection.run()
-        if listener_key in active_listeners and active_listeners[listener_key] == market_connection:
-            del active_listeners[listener_key]
+        # Cleanup if socket closes unexpectedly
+        if slug in market_streams and market_streams[slug] == market_connection:
+            del market_streams[slug]
 
     thread = threading.Thread(target=run_websocket)
     thread.daemon = True
@@ -133,25 +152,34 @@ async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     print("Database initialized")
 
+    # Sync Redis with DB on startup
     db = SessionLocal()
     try:
         subscriptions = db.query(Subscription).all()
-        print(f"Restoring {len(subscriptions)} active subscriptions")
+        print(f"Restoring {len(subscriptions)} active subscriptions from DB to Redis")
+
+        # Clear existing redis keys for safety
+        keys = r.keys("subscriptions:*")
+        if keys:
+            r.delete(*keys)
+
         for sub in subscriptions:
-            print(f"Restarting tracker for {sub.slug} (Chat: {sub.chat_id}")
-            start_listener(sub.chat_id, sub.slug, sub.limit_usd)
+            # Update Redis state
+            r.hset(f"subscriptions:{sub.slug}", sub.chat_id, sub.limit_usd)
+            # Ensure stream is running (Deduplicated)
+            ensure_market_stream(sub.slug)
     finally:
         db.close()
 
     yield
 
     print("Shutting down... closing listeners")
-    for key, listener in list(active_listeners.items()):
+    for key, listener in list(market_streams.items()):
         try:
             listener.close()
         except:
             pass
-    active_listeners.clear()
+    market_streams.clear()
 
 app = FastAPI(lifespan=lifespan)
 
@@ -227,8 +255,14 @@ def get_live_trades(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
+    # Update Redis (Active State)
+    try:
+        r.hset(f"subscriptions:{slug}", chat_id, limit)
+    except Exception as e:
+        print(f"Redis error: {e}")
+
     # Start Listener (runtime)
-    success, msg = start_listener(chat_id, slug, limit)
+    success, msg = ensure_market_stream(slug)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {
@@ -256,18 +290,20 @@ def untrack_market(
         db.rollback()
         return HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-    # Stop listener
-    listener_key = f"{chat_id}_{slug}"
-    if listener_key in active_listeners:
-        try:
-            active_listeners[listener_key].close()
-            return {"message": f"Stopped tracking {slug}"}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error stopping track: {str(e)}")
-    else:
-        raise HTTPException(status_code=404, detail=f"Not currently tracking {slug}")
+    # Remove from Redis
+    r.hdel(f"subscriptions:{slug}", chat_id)
 
-if __name__ == '__main__':
-    import uvicorn
-    is_debug = os.getenv("FLASK_DEBUG", "False").lower() in ("true", "1", "t")
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=is_debug)
+    # Check if any subscribers left for this slug
+    remaining = r.hlen(f"subscriptions:{slug}")
+
+    # Manage Stream
+    if remaining == 0:
+        if slug in market_streams:
+            try:
+                market_streams[slug].close()
+                del market_streams[slug]
+                return {"message": f"Stopped tracking {slug} (Stream closed)"}
+            except Exception as e:
+                print(f"Error closing stream: {e}")
+
+    return {"message": f"Stopped tracking {slug}"}

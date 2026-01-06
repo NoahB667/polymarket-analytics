@@ -1,6 +1,5 @@
-
 services:
-  flask_api:
+  fastapi:
     build: .
     container_name: polymarket_api
     command: uvicorn app:app --host 0.0.0.0 --port 8000
@@ -9,9 +8,12 @@ services:
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - DATABASE_URL=postgresql://postgres:pass@db:5432/polydb
+      - REDIS_URL=redis://redis:6379/0
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]
       interval: 30s
@@ -23,12 +25,12 @@ services:
     container_name: polymarket_bot
     command: python bot.py
     depends_on:
-      flask_api:
+      fastapi:
         condition: service_healthy
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - FLASK_API_URL=http://flask_api:8000
-      - FLASK_DEBUG=False
+      - FASTAPI_URL=http://polymarket_api:8000
+      - API_DEBUG=False
     restart: always
   db:
     image: postgres:15-alpine
@@ -47,6 +49,13 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: polymarket_redis
+    ports:
+      - "6379:6379"
+    restart: always
 
 volumes:
   postgres_data:
