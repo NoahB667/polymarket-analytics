@@ -17,7 +17,7 @@ from WebSocketOrderBook import WebSocketOrderBook
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = os.getenv("REDIS_URL", "redis://polymarket_redis:6379/0")
 
 # Database config
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polymarket.db")
@@ -35,6 +35,13 @@ class Subscription(Base):
 
 # Redis Client
 r = redis.from_url(REDIS_URL, decode_responses=True)
+try:
+    r.ping()
+    print("Successfully connected to Redis!")
+except redis.exceptions.AuthenticationError:
+    print("Redis Authentication failed! Check your password in the URL.")
+except redis.exceptions.ConnectionError:
+    print("Could not connect to Redis. Check the hostname/network.")
 
 # In memory state for active WebSocket connections (Key: slug, Value: WebSocketOrderBook)
 # Deduplicates connections.

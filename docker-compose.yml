@@ -8,7 +8,7 @@ services:
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - DATABASE_URL=postgresql://postgres:pass@db:5432/polydb
-      - REDIS_URL=redis://redis:6379/0
+      - REDIS_URL=${REDIS_URL}
     depends_on:
       db:
         condition: service_healthy
@@ -50,7 +50,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: polymarket_redis
-    command: redis-server --requirepass REDIS_PASSWORD
+    command: redis-server --requirepass ${REDIS_PASSWORD}
     restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
