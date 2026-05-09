@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 import redis
 from typing import Dict
 
-from WebSocketOrderBook import WebSocketOrderBook
+from websocket_order_book import WebSocketOrderBook
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
