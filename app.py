@@ -3,6 +3,7 @@ import threading
 import asyncio
 import requests
 import json
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, Query
@@ -32,6 +33,21 @@ class Subscription(Base):
     slug = Column(String(200), nullable=False)
     limit_usd = Column(Float, default=0.0)
     __table_args__ = (UniqueConstraint('chat_id', 'slug', name='_chat_slug_uc'),)
+
+
+class Trade(Base):
+    __tablename__ = "trade"
+    id = Column(Integer, primary_key=True)
+    slug = Column(String(200), nullable=False, index=True)
+    market = Column(String(100))
+    asset_id = Column(String(100))
+    price = Column(Float)
+    size = Column(Float)
+    usd = Column(Float)
+    side = Column(String(10))
+    question = Column(String(500))
+    outcome = Column(String(200))
+    timestamp = Column(Float, index=True)
 
 # Redis Client
 r = redis.from_url(REDIS_URL, decode_responses=True)
@@ -118,19 +134,46 @@ def ensure_market_stream(slug):
         return False, error
 
     # Callback now handles all users for this slug
-    def on_trade_callback(message_text, trade_value):
-        # Redis Key: subscriptions:{slug} -> Hash { chat_id: limit_usd }
+    def on_trade_callback(details):
+        # details: dict with price/size/usd/market/asset_id/side/question/outcome
         try:
             subscribers = r.hgetall(f"subscriptions:{slug}")
             for chat_id, limit in subscribers.items():
                 try:
                     user_limit = float(limit)
-                    if trade_value >= user_limit:
-                        send_telegram_alert(chat_id, message_text)
+                    if details.get("usd", 0) >= user_limit:
+                        text = f"{details.get('side', '?')} @ {details.get('price')} ({details.get('usd', 0):.2f}$), {details.get('question')} {details.get('outcome')}"
+                        send_telegram_alert(chat_id, text)
                 except ValueError:
                     continue
         except Exception as e:
             print(f"Error accessing redis in callback: {e}")
+
+        # Persist the trade (best-effort, non-blocking for alerts)
+        db = None
+        try:
+            db = SessionLocal()
+            trade = Trade(
+                slug=slug,
+                market=details.get("market"),
+                asset_id=str(details.get("asset_id")),
+                price=details.get("price"),
+                size=details.get("size"),
+                usd=details.get("usd"),
+                side=details.get("side"),
+                question=details.get("question"),
+                outcome=details.get("outcome"),
+                timestamp=time.time(),
+            )
+            db.add(trade)
+            db.commit()
+        except Exception as e:
+            if db:
+                db.rollback()
+            print(f"Failed to persist trade: {e}")
+        finally:
+            if db:
+                db.close()
 
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
