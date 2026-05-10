@@ -6,17 +6,29 @@ import threading
 
 MARKET_CHANNEL = "market"
 
-def get_question(market):
+def get_question(market, redis_client):
+    cache_key = f"meta:question:{market}"
+    cached = redis_client.get(cache_key)
+    if cached:
+        return cached
+    
     url = f"https://clob.polymarket.com/markets/{market}"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
-        return data.get("question", "N/A")
+        question = data.get("question", "N/A")
+        redis_client.setex(cache_key, 86400, question)  # Cache 24 hours
+        return question
     except Exception as e:
-        return f"Error: {str(e)}"
+        return "N/A"
 
-def get_outcome(market, asset_id):
+def get_outcome(market, asset_id, redis_client):
+    cache_key = f"meta:outcome:{market}:{asset_id}"
+    cached = redis_client.get(cache_key)
+    if cached:
+        return cached
+    
     url = f"https://clob.polymarket.com/markets/{market}"
     try:
         response = requests.get(url, timeout=10)
@@ -24,10 +36,12 @@ def get_outcome(market, asset_id):
         data = response.json()
         for token in data.get("tokens", []):
             if asset_id == token.get("token_id"):
-                return token.get("outcome", "N/A")
-        return "Outcome not found"
+                outcome = token.get("outcome", "N/A")
+                redis_client.setex(cache_key, 86400, outcome)
+                return outcome
+        return "N/A"
     except Exception as e:
-        return f"Error: {str(e)}"
+        return "N/A"
 
 class WebSocketOrderBook:
     def __init__(self, channel_type, url, data, message_callback, verbose, min_size_usd=0):
