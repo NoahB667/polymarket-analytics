@@ -237,7 +237,32 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get('/')
 def health_check():
-    return {"status": "healthy", "service": "polymarket-analytics-api"}
+    # Check Redis
+    try:
+        r.ping()
+        redis_status = "healthy"
+    except:
+        redis_status = "down"
+
+    # Check DB
+    try:
+        db = SessionLocal()
+        db.execute("SELECT 1")
+        db.close()
+        db_status = "healthy"
+    except:
+        db_status = "down"
+
+    # Check active streams
+    stream_count = len(market_streams)
+
+    return {
+        "status": "healthy",
+        "service": "polymarket-analytics-api",
+        "redis": redis_status,
+        "database": db_status,
+        "active_streams": stream_count
+    }
 
 @app.get('/get-event-details/{slug}')
 def get_event_details(slug: str):
