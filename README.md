@@ -2,7 +2,7 @@
 
 A high-performance, real-time trades alert system for [Polymarket](https://polymarket.com). This system ingests live order book data via WebSockets, filters for significant trades ("whale movements"), and delivers sub-second notifications via Telegram.
 
-Bot is currently down (migrating to a different host): **[@polymarket_live_trades_bot](https://t.me/polymarket_live_trades_bot)**
+Try the live bot on Telegram: **[@polymarket_live_trades_bot](https://t.me/polymarket_live_trades_bot)**
 ![Demo](./Demo.png)
 
 ## Features
