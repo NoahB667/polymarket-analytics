@@ -1,60 +1,84 @@
+import os
 import requests
 from websocket import WebSocketApp
 import json
 import time
 import threading
+from typing import Dict, Optional
+
+import redis
 
 MARKET_CHANNEL = "market"
 
-def get_question(market, redis_client=None):
+def _build_redis_client() -> Optional[redis.Redis]:
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        return None
+    try:
+        client = redis.from_url(redis_url, decode_responses=True)
+        client.ping()
+        return client
+    except Exception:
+        return None
+
+
+def get_market_metadata(market: str, redis_client: Optional[redis.Redis]) -> Dict[str, object]:
+    question_key = f"meta:question:{market}"
+    outcome_prefix = f"meta:outcome:{market}:"
+
     if redis_client is not None:
-        cache_key = f"meta:question:{market}"
-        cached = redis_client.get(cache_key)
-        if cached:
-            return cached
-    
+        cached_question = redis_client.get(question_key)
+        cached_outcomes = {}
+        if cached_question:
+            for key in redis_client.scan_iter(f"{outcome_prefix}*"):
+                asset_id = key.split(":")[-1]
+                cached_value = redis_client.get(key)
+                if cached_value is not None:
+                    cached_outcomes[asset_id] = cached_value
+            if cached_outcomes:
+                return {
+                    "question": cached_question,
+                    "outcomes": cached_outcomes,
+                }
+
     url = f"https://clob.polymarket.com/markets/{market}"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         question = data.get("question", "N/A")
-        if redis_client is not None:
-            redis_client.setex(cache_key, 86400, question)  # Cache 24 hours
-        return question
-    except Exception as e:
-        return "N/A"
-
-def get_outcome(market, asset_id, redis_client=None):
-    if redis_client is not None:
-        cache_key = f"meta:outcome:{market}:{asset_id}"
-        cached = redis_client.get(cache_key)
-        if cached:
-            return cached
-    
-    url = f"https://clob.polymarket.com/markets/{market}"
-    try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
+        outcomes = {}
         for token in data.get("tokens", []):
-            if asset_id == token.get("token_id"):
-                outcome = token.get("outcome", "N/A")
-                if redis_client is not None:
-                    redis_client.setex(cache_key, 86400, outcome)
-                return outcome
-        return "N/A"
-    except Exception as e:
-        return "N/A"
+            token_id = str(token.get("token_id"))
+            outcomes[token_id] = token.get("outcome", "N/A")
+
+        if redis_client is not None:
+            redis_client.setex(question_key, 86400, question)
+            for token_id, outcome in outcomes.items():
+                redis_client.setex(f"{outcome_prefix}{token_id}", 86400, outcome)
+
+        return {"question": question, "outcomes": outcomes}
+    except Exception:
+        return {"question": "N/A", "outcomes": {}}
 
 class WebSocketOrderBook:
-    def __init__(self, channel_type, url, data, message_callback, verbose, min_size_usd=0):
+    def __init__(
+        self,
+        channel_type,
+        url,
+        data,
+        message_callback,
+        verbose,
+        min_size_usd=0,
+        redis_client: Optional[redis.Redis] = None,
+    ):
         self.channel_type = channel_type
         self.url = url
         self.data = data
         self.message_callback = message_callback
         self.verbose = verbose
         self.min_size_usd = float(min_size_usd)
+        self.redis_client = redis_client or _build_redis_client()
         self.ws = WebSocketApp(
             url=self.url,
             on_message=self.on_message,
@@ -79,13 +103,18 @@ class WebSocketOrderBook:
                             if usd < self.min_size_usd:
                                 continue
 
-                            question = get_question(msg.get("market"))
-                            outcome = get_outcome(msg.get("market"), msg.get("asset_id"))
+                            market_id = msg.get("market")
+                            metadata = get_market_metadata(market_id, self.redis_client)
+                            question = metadata.get("question", "N/A")
+                            outcome = metadata.get("outcomes", {}).get(
+                                str(msg.get("asset_id")),
+                                "N/A",
+                            )
                             side = msg.get("side", "?")
                             text = f"{side} @ {price} ({usd:.2f}$), {question} {outcome}"
                             if self.message_callback:
                                 details = {
-                                    "market": msg.get("market"),
+                                    "market": market_id,
                                     "asset_id": msg.get("asset_id"),
                                     "price": float(price),
                                     "size": float(size),
