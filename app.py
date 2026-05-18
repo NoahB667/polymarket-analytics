@@ -7,13 +7,14 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends, Query
-from sqlalchemy import create_engine, Column, Integer, String, Float, UniqueConstraint
-from sqlalchemy.orm import sessionmaker, Session, declarative_base
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, Session
 from telegram import Bot
 from dotenv import load_dotenv
 import redis
 from typing import Dict
 
+from models.orm import Base, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
 
 load_dotenv()
@@ -24,30 +25,6 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://polymarket_redis:6379/0")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polymarket.db")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
-
-class Subscription(Base):
-    __tablename__ = "subscription"
-    id = Column(Integer, primary_key=True)
-    chat_id = Column(String(50), nullable=False)
-    slug = Column(String(200), nullable=False)
-    limit_usd = Column(Float, default=0.0)
-    __table_args__ = (UniqueConstraint('chat_id', 'slug', name='_chat_slug_uc'),)
-
-
-class Trade(Base):
-    __tablename__ = "trade"
-    id = Column(Integer, primary_key=True)
-    slug = Column(String(200), nullable=False, index=True)
-    market = Column(String(100))
-    asset_id = Column(String(100))
-    price = Column(Float)
-    size = Column(Float)
-    usd = Column(Float)
-    side = Column(String(10))
-    question = Column(String(500))
-    outcome = Column(String(200))
-    timestamp = Column(Float, index=True)
 
 # Redis Client
 r = redis.from_url(REDIS_URL, decode_responses=True)
