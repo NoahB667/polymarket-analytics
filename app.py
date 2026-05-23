@@ -5,6 +5,7 @@ import requests
 import json
 import time
 from contextlib import asynccontextmanager
+from queue import Queue, Full
 
 from fastapi import FastAPI, HTTPException, Depends, Query
 from sqlalchemy import create_engine
@@ -23,7 +24,12 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://polymarket_redis:6379/0")
 
 # Database config
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polymarket.db")
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Redis Client
@@ -39,6 +45,29 @@ except redis.exceptions.ConnectionError:
 # In memory state for active WebSocket connections (Key: slug, Value: WebSocketOrderBook)
 # Deduplicates connections.
 market_streams: Dict[str, WebSocketOrderBook] = {}
+
+# Background DB write queue (non-blocking for WebSocket thread)
+trade_write_queue: "Queue[dict]" = Queue(maxsize=10000)
+_writer_thread_started = False
+
+def db_writer_worker():
+    """Runs in background thread, drains write queue."""
+    while True:
+        try:
+            trade_data = trade_write_queue.get(timeout=1)
+            db = SessionLocal()
+            try:
+                trade = Trade(**trade_data)
+                db.add(trade)
+                db.commit()
+            except Exception as e:
+                db.rollback()
+                print(f"DB write failed: {e}")
+            finally:
+                db.close()
+            trade_write_queue.task_done()
+        except Exception:
+            continue
 
 def get_db():
     db = SessionLocal()
@@ -113,6 +142,23 @@ def ensure_market_stream(slug):
     # Callback now handles all users for this slug
     def on_trade_callback(details):
         # details: dict with price/size/usd/market/asset_id/side/question/outcome
+        # Enqueue DB write (non-blocking)
+        try:
+            trade_write_queue.put_nowait({
+                "slug": slug,
+                "market": details.get("market"),
+                "asset_id": str(details.get("asset_id")),
+                "price": details.get("price"),
+                "size": details.get("size"),
+                "usd": details.get("usd"),
+                "side": details.get("side"),
+                "question": details.get("question"),
+                "outcome": details.get("outcome"),
+                "timestamp": time.time(),
+            })
+        except Full:
+            print("Write queue full, dropping trade")
+
         try:
             subscribers = r.hgetall(f"subscriptions:{slug}")
             for chat_id, limit in subscribers.items():
@@ -125,32 +171,6 @@ def ensure_market_stream(slug):
                     continue
         except Exception as e:
             print(f"Error accessing redis in callback: {e}")
-
-        # Persist the trade (best-effort, non-blocking for alerts)
-        db = None
-        try:
-            db = SessionLocal()
-            trade = Trade(
-                slug=slug,
-                market=details.get("market"),
-                asset_id=str(details.get("asset_id")),
-                price=details.get("price"),
-                size=details.get("size"),
-                usd=details.get("usd"),
-                side=details.get("side"),
-                question=details.get("question"),
-                outcome=details.get("outcome"),
-                timestamp=time.time(),
-            )
-            db.add(trade)
-            db.commit()
-        except Exception as e:
-            if db:
-                db.rollback()
-            print(f"Failed to persist trade: {e}")
-        finally:
-            if db:
-                db.close()
 
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
@@ -178,6 +198,13 @@ def ensure_market_stream(slug):
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     print("Database initialized")
+
+    # Start DB writer thread once
+    global _writer_thread_started
+    if not _writer_thread_started:
+        writer_thread = threading.Thread(target=db_writer_worker, daemon=True)
+        writer_thread.start()
+        _writer_thread_started = True
 
     # Sync Redis with DB on startup
     db = SessionLocal()

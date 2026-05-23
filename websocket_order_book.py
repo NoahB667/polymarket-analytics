@@ -151,7 +151,24 @@ class WebSocketOrderBook:
                 print(f"Ping error: {e}")
 
     def run(self):
-        self.ws.run_forever()
+        while True:
+            try:
+                self.ws.run_forever(
+                    ping_interval=20,
+                    ping_timeout=10,
+                    reconnect=5
+                )
+            except Exception as e:
+                print(f"WebSocket crashed: {e}")
+
+            print("Reconnecting in 5s")
+            time.sleep(5)
+            self.ws = WebSocketApp(
+                url=self.url,
+                on_message=self.on_message,
+                on_open=self.on_open,
+                on_close=self.on_close,
+            )
 
     def close(self):
         if self.ws:
