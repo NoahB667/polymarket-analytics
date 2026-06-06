@@ -4,7 +4,7 @@ import time
 import logging
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 logger = logging.getLogger("polymarket.core.cpp_bridge")
 
@@ -57,10 +57,48 @@ class CoreEngineBridge:
             self._priority_queue: deque = deque(maxlen=queue_capacity)
             self._stats = PythonStatsMock(pool_available=pool_capacity)
             self._market_cache: Dict[str, int] = {}
+            # Fallback memory matrix: Dict[market_id, Dict[chat_id, min_usd]]
+            self._fallback_subscriptions: Dict[int, Dict[int, float]] = {}
 
     def is_cpp_available(self) -> bool:
         """Returns True if the high-performance C++ shared object engine is actively bound."""
         return self._engine is not None
+
+    def update_subscription(self, chat_id: int, market_hash: int, min_usd: float) -> None:
+        """
+        Updates or inserts a user routing threshold profile rule inside the active filter engine.
+        
+        Args:
+            chat_id: Unique identifying integer tracking the target user destination.
+            market_hash: Stable hash identity identifier of the target prediction pool.
+            min_usd: The minimum dollar limit execution volume required to trigger a matching event.
+        """
+        if self._engine:
+            self._engine.update_subscription(chat_id, market_hash, min_usd)
+        else:
+            # Mirror performance changes inside local state tables if C++ engine is absent
+            if market_hash not in self._fallback_subscriptions:
+                self._fallback_subscriptions[market_hash] = {}
+            self._fallback_subscriptions[market_hash][chat_id] = min_usd
+            logger.debug(f"[Fallback Sync] Updated subscription: Market={market_hash}, User={chat_id}, Limit=${min_usd}")
+
+    def remove_subscription(self, chat_id: int, market_hash: int) -> None:
+        """
+        Deletes a user tracking rule entirely from the engine tracking matrix.
+        
+        Args:
+            chat_id: Unique identifying integer tracking the target user destination.
+            market_hash: Stable hash identity identifier of the target prediction pool.
+        """
+        if self._engine:
+            self._engine.remove_subscription(chat_id, market_hash)
+        else:
+            # Purge entry points safely from local python structures
+            if market_hash in self._fallback_subscriptions:
+                self._fallback_subscriptions[market_hash].pop(chat_id, None)
+                if not self._fallback_subscriptions[market_hash]:
+                    self._fallback_subscriptions.pop(market_hash)
+            logger.debug(f"[Fallback Sync] Removed subscription: Market={market_hash}, User={chat_id}")
 
     def process_message(self, payload: str) -> bool:
         """
@@ -77,7 +115,6 @@ class CoreEngineBridge:
         self._stats.received_total += 1
         
         try:
-            # Simple string token extraction mimicking the speed of our custom C++ scanner
             def extract_val(key: str) -> str:
                 idx = payload.find(key)
                 if idx == -1:
@@ -103,7 +140,6 @@ class CoreEngineBridge:
                 self._stats.parse_errors += 1
                 return False
 
-            # Generate lightweight, stable string hashes for IDs
             def hash32(val: str) -> int:
                 h = 2166136261
                 for char in val.encode('utf-8', 'ignore'):
@@ -111,29 +147,38 @@ class CoreEngineBridge:
                 return h
 
             market_id = self._market_cache.setdefault(market_sv, hash32(market_sv))
+            trade_usd = float(price_sv) * float(size_sv)
             
-            # Pack internal dictionary structure
             trade = {
                 "market_id": market_id,
-                "asset_id": hash32(asset_sv), # Using 32-bit bound safe value for python default indexing maps
+                "asset_id": hash32(asset_sv),
                 "price": float(price_sv),
                 "size": float(size_sv),
-                "usd": float(price_sv) * float(size_sv),
+                "usd": trade_usd,
                 "side": side_sv if side_sv in ("BUY", "SELL") else "UNKNOWN",
                 "timestamp_ms": int(time_sv) if time_sv else int(time.time() * 1000)
             }
 
-            # LAYER 2 ANOMALY PRE-FILTER PREDICTIVE FALLBACK MATRIX
-            # Score trades from 0 to 3 based on simple heuristics
+            # LAYER 2 ANOMALY PRE-FILTER PREDICTIVE FALLBACK MATRIX WITH ROUTING MATCH CHECKS
             score = 0
-            if trade["usd"] > 5000.0:  # Mock high-volume metric threshold placement
+            if trade_usd > 5000.0:
                 score += 1
-            if trade["price"] < 0.20:  # Long-shot trade condition
+            if trade["price"] < 0.20:
                 score += 1
+                
+            # Cross-examine local subscription tables to identify threshold crossings
+            has_matching_subscriber = False
+            if market_id in self._fallback_subscriptions:
+                for uid, min_limit in self._fallback_subscriptions[market_id].items():
+                    if trade_usd >= min_limit:
+                        has_matching_subscriber = True
+                        break
+
+            if has_matching_subscriber:
+                score += 1  # Route to priority queue if an active subscriber limit is triggered
 
             self._stats.processed_total += 1
 
-            # Distribute to the appropriate mock queue based on the anomaly score
             if score >= 2:
                 self._stats.filter_matches += 1
                 if len(self._priority_queue) < self._queue_capacity:
@@ -146,11 +191,9 @@ class CoreEngineBridge:
                 else:
                     self._stats.push_fail_total += 1
 
-            # Update queue depth stats metrics
             self._stats.priority_depth = len(self._priority_queue)
             self._stats.normal_depth = len(self._normal_queue)
 
-            # Record processing latency metrics
             duration_us = (time.perf_counter_ns() - t_start) / 1000.0
             if duration_us <= 1.0: self._stats.latency_bucket_0_1us += 1
             elif duration_us <= 10.0: self._stats.latency_bucket_1_10us += 1
@@ -241,6 +284,6 @@ class CoreEngineBridge:
             "price": trade.price,
             "size": trade.size,
             "usd": trade.usd,
-            "side": getattr(trade.side, "name", str(trade.side)),
+            "side": getattr(trade.side, "name", str(trade.side).upper()),
             "timestamp_ms": trade.timestamp_ms,
         }

@@ -45,11 +45,15 @@ PYBIND11_MODULE(polymarket_core, m) {
         .def(py::init<std::size_t, std::size_t>(), py::arg("pool_capacity"), py::arg("queue_capacity"))
         .def("process_json", &polymarket::CoreEngine::process_json, py::arg("json"), 
              "Processes a raw incoming WebSocket data frame text.")
-        .def("pop_priority", &polymarket::CoreEngine::pop_priority, py::arg("out_trade"),
-             "Pulls high-suspicion anomalies directly into your pre-allocated Python trade target reference.")
-        .def("pop_normal", &polymarket::CoreEngine::pop_normal, py::arg("out_trade"),
-             "Pulls standard trades directly into your pre-allocated Python trade target reference.")
-        .def("get_stats", &polymarket::CoreEngine::get_stats, "Collects a lock-free snapshot of engine metrics.")
-        .def("update_subscription", &polymarket::CoreEngine::update_subscription, py::arg("market_id"), py::arg("user_id"), py::arg("min_usd"))
-        .def("remove_subscription", &polymarket::CoreEngine::remove_subscription, py::arg("market_id"), py::arg("user_id"));
+        .def("pop_priority", static_cast<std::unique_ptr<polymarket::RawTrade> (polymarket::CoreEngine::*)()>(
+            &polymarket::CoreEngine::pop_priority),
+            "Pulls high-suspicion anomalies directly into your pre-allocated Python trade target reference.")
+        .def("pop_normal", static_cast<std::unique_ptr<polymarket::RawTrade> (polymarket::CoreEngine::*)()>(
+            &polymarket::CoreEngine::pop_normal),
+            "Pulls standard trades directly into your pre-allocated Python trade target reference.")
+        .def("update_subscription", &polymarket::CoreEngine::update_subscription, 
+             py::arg("chat_id"), py::arg("market_hash"), py::arg("min_usd"))
+        .def("remove_subscription", &polymarket::CoreEngine::remove_subscription, 
+             py::arg("chat_id"), py::arg("market_hash"))
+        .def("get_stats", &polymarket::CoreEngine::get_stats);
 }

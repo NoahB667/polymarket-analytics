@@ -17,9 +17,11 @@ public:
     bool process_json(std::string_view json);
     bool pop_priority(RawTrade& out_trade) noexcept;
     bool pop_normal(RawTrade& out_trade) noexcept;
+    std::unique_ptr<RawTrade> pop_priority() noexcept;
+    std::unique_ptr<RawTrade> pop_normal() noexcept;
     MetricsSnapshot get_stats() const noexcept;
-    void update_subscription(std::uint32_t market_id, std::uint64_t user_id, double min_usd);
-    void remove_subscription(std::uint32_t market_id, std::uint64_t user_id);
+    void update_subscription(std::uint32_t chat_id, std::uint64_t market_hash, double min_usd);
+    void remove_subscription(std::uint32_t chat_id, std::uint64_t market_hash);
 
 private:
     ObjectPool pool_;
