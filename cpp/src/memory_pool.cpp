@@ -1,5 +1,4 @@
 #include "memory_pool.h"
-#include <mutex>
 
 namespace polymarket{
 

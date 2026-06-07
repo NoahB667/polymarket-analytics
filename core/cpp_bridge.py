@@ -3,8 +3,8 @@
 import time
 import logging
 from collections import deque
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Set
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger("polymarket.core.cpp_bridge")
 
