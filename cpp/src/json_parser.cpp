@@ -100,12 +100,13 @@ namespace {
 
 namespace polymarket {
 
-    bool JsonTradeConverter::parse_trade(std::string_view json, RawTrade& out_trade) {
+    ParseResult JsonTradeConverter::parse_trade(std::string_view json, RawTrade& out_trade) {
         // 1. Verify event type immediately to discard invalid frame profiles
         std::string_view event_type = extract_field_value(json, "\"event_type\"");
-        if (event_type != "last_trade_price") {
-            return false;
-        }
+
+        if (event_type.empty()) return ParseResult::InvalidFormat;
+
+        if (event_type != "last_trade_price") return ParseResult::Skip;
 
         // 2. Extract string-wrapped text data segments
         std::string_view market_sv = extract_field_value(json, "\"market\"");
@@ -116,7 +117,7 @@ namespace polymarket {
         std::string_view time_sv = extract_field_value(json, "\"timestamp\"");
 
         if (market_sv.empty() || asset_sv.empty() || price_sv.empty() || size_sv.empty()) {
-            return false;
+            return ParseResult::InvalidFormat;
         }
 
         // 3. Assign and parse identity states
@@ -128,13 +129,13 @@ namespace polymarket {
         else out_trade.side = Side::Unknown;
 
         // 4. Parse values into their target primitives
-        if (!fast_numeric_parse(price_sv, out_trade.price)) return false;
-        if (!fast_numeric_parse(size_sv, out_trade.size)) return false;
-        if (!fast_numeric_parse(time_sv, out_trade.timestamp_ms)) return false;
+        if (!fast_numeric_parse(price_sv, out_trade.price)) return ParseResult::InvalidFormat;
+        if (!fast_numeric_parse(size_sv, out_trade.size)) return ParseResult::InvalidFormat;
+        if (!fast_numeric_parse(time_sv, out_trade.timestamp_ms)) return ParseResult::InvalidFormat;
 
         // 5. Compute derived matrix results
         out_trade.usd = out_trade.price * out_trade.size;
-        return true;
+        return ParseResult::Success;
     }
 
     std::uint32_t JsonTradeConverter::get_market_id(std::string_view market) {

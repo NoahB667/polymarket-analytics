@@ -1,0 +1,7 @@
+# Cache structures and compiled local binaries
+cpp/build/
+.git/
+__pycache__/
+*.pyc
+*.so
+.env

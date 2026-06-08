@@ -2,9 +2,11 @@ services:
   fastapi:
     build: .
     container_name: polymarket_api
-    command: uvicorn app:app --host 0.0.0.0 --port 8000
+    command: uvicorn app:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
+    volumes:
+      - .:/app
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
       - DATABASE_URL=postgresql://postgres:pass@db:5432/polydb
@@ -20,10 +22,13 @@ services:
       timeout: 10s
       retries: 3
     restart: always
+
   telegram_bot:
     build: .
     container_name: polymarket_bot
     command: python bot.py
+    volumes:
+      - .:/app
     depends_on:
       fastapi:
         condition: service_healthy
@@ -32,6 +37,7 @@ services:
       - FASTAPI_URL=http://polymarket_api:8000
       - API_DEBUG=False
     restart: always
+
   db:
     image: postgres:15-alpine
     container_name: polymarket_db
@@ -43,17 +49,18 @@ services:
       - postgres_data:/var/lib/postgresql/data
     restart: always
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d polydb"]
       interval: 10s
       timeout: 5s
       retries: 5
+
   redis:
     image: redis:7-alpine
     container_name: polymarket_redis
     command: redis-server --requirepass ${REDIS_PASSWORD}
     restart: always
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -72,3 +79,5 @@ services:
 
 volumes:
   postgres_data:
+  polymarket_binary_root:
+  polymarket_binary_core:

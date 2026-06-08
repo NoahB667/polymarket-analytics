@@ -10,10 +10,11 @@ namespace polymarket {
         Sell = 2
     };
 
-    // exactly 48 bytes
+    // exactly 56 bytes
     struct alignas(8) RawTrade {
         std::uint64_t asset_id{0};
         std::int64_t timestamp_ms{0};
+        std::uint64_t ingestion_time_us{0};
         double price{0.0};
         double size{0.0};
         double usd{0.0};

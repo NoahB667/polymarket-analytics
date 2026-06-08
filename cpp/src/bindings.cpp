@@ -46,10 +46,10 @@ PYBIND11_MODULE(polymarket_core, m) {
         .def("process_json", &polymarket::CoreEngine::process_json, py::arg("json"), 
              "Processes a raw incoming WebSocket data frame text.")
         .def("pop_priority", static_cast<std::unique_ptr<polymarket::RawTrade> (polymarket::CoreEngine::*)()>(
-            &polymarket::CoreEngine::pop_priority),
+            &polymarket::CoreEngine::pop_priority), py::return_value_policy::move,
             "Pulls high-suspicion anomalies directly into your pre-allocated Python trade target reference.")
         .def("pop_normal", static_cast<std::unique_ptr<polymarket::RawTrade> (polymarket::CoreEngine::*)()>(
-            &polymarket::CoreEngine::pop_normal),
+            &polymarket::CoreEngine::pop_normal), py::return_value_policy::move,
             "Pulls standard trades directly into your pre-allocated Python trade target reference.")
         .def("update_subscription", &polymarket::CoreEngine::update_subscription, 
              py::arg("chat_id"), py::arg("market_hash"), py::arg("min_usd"))

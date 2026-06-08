@@ -1,5 +1,5 @@
 import os
-import requests
+import httpx
 from dotenv import load_dotenv
 from typing import Final
 from telegram import Update
@@ -41,7 +41,10 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             url = f"{FASTAPI_URL}/get-live-trades/{slug}"
 
         params = {'chat_id': chat_id}
-        response = requests.get(url, params, timeout=5)
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=5.0)
+            
         if response.status_code == 200:
             await update.message.reply_text(f"Tracking started, alerts will be sent here.")
         else:
@@ -61,7 +64,10 @@ async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params = {'chat_id': chat_id}
 
     try:
-        response = requests.get(url, params=params, timeout=5)
+        # FIXED: Non-blocking async client for untrack operations
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, params=params, timeout=5.0)
+            
         if response.status_code == 200:
              await update.message.reply_text(f"Stopped tracking: {slug}")
         elif response.status_code == 404:
@@ -79,7 +85,7 @@ def handle_response(text: str) -> str:
     else:
         return 'If you are lost, please type: /help'
 
-async def handle_message(update: Update):
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_type: str = update.message.chat.type
     text: str = update.message.text
 

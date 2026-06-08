@@ -13,14 +13,30 @@ namespace polymarket {
           metrics_() {}
 
     bool CoreEngine::process_json(std::string_view json) {
+        if (json == "ping" || json == "\"ping\"" || json.empty()) [[unlikely]] {
+            return true; 
+        }
+
+        // Capture precise entry time before running the parser
+        auto entry_time = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+
         metrics_.record_trade_received();
 
-        // ZERO-COPY OVERHEAD: Parse directly into a clean 48-byte stack variable
+        // ZERO-COPY OVERHEAD: Parse directly into a clean 56-byte stack variable
         RawTrade trade{}; 
+        trade.ingestion_time_us = static_cast<std::uint64_t>(entry_time);
 
-        // Parse JSON straight into our stack variable memory space
-        if (!parser_.parse_trade(json, trade)) {
-            metrics_.record_parse_error();
+        ParseResult result = parser_.parse_trade(json, trade);
+
+        if (result == ParseResult::Skip) [[likely]] {
+            // Drop non-trade messages silently without incrementing parse_errors
+            return true; 
+        }
+        
+        if (result == ParseResult::InvalidFormat) [[unlikely]] {
+            metrics_.record_parse_error(); // True semantic/formatting failure
             return false;
         }
 
@@ -51,9 +67,15 @@ namespace polymarket {
             return false;
         }
         
-        std::uint64_t now = 1717643587000; // Simulated timestamp reference
-        if (now > static_cast<std::uint64_t>(out_trade.timestamp_ms)) {
-            metrics_.observe_latency_us(now - out_trade.timestamp_ms);
+        auto exit_time = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+
+        std::uint64_t now = static_cast<std::uint64_t>(exit_time);
+        
+        if (now > out_trade.ingestion_time_us) {
+            // Measures pure internal processing speed in microseconds
+            metrics_.observe_latency_us(now - out_trade.ingestion_time_us);
         }
 
         return true;
@@ -65,9 +87,14 @@ namespace polymarket {
             return false;
         }
 
-        std::uint64_t now = 1717643587000;
-        if (now > static_cast<std::uint64_t>(out_trade.timestamp_ms)) {
-            metrics_.observe_latency_us(now - out_trade.timestamp_ms);
+        auto exit_time = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+
+        std::uint64_t now = static_cast<std::uint64_t>(exit_time);
+        
+        if (now > out_trade.ingestion_time_us) {
+            metrics_.observe_latency_us(now - out_trade.ingestion_time_us);
         }
 
         return true;
