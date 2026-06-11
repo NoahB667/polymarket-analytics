@@ -18,6 +18,7 @@ import redis
 
 from models.orm import Base, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
+from analytics.order_flow import append_trade, generate_signal_score
 
 load_dotenv()
 logger = logging.getLogger("polymarket.api")
@@ -165,33 +166,64 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
     def on_trade_dispatched(details: dict):
         """
         Hot path pass-through.
-        C++ engine handles filtration logic; Python simply handles persistent writes.
+        C++ engine handles filtration logic; Python updates metrics,
+        caches live signals in Redis, and schedules DB updates.
         """
+        # Extract numeric primitives for our math metrics safely
+        price = float(details.get("price", 0.0))
+        size = float(details.get("size", 0.0))
+        usd = float(details.get("usd", 0.0))
+        side = details.get("side", "BUY")
+        trade_slug = details.get("slug", slug) # Fallback to context slug if needed
+
+        # Pack a localized dictionary for our rolling memory windows
+        trade_payload = {
+            "price": price,
+            "size": size,
+            "usd": usd,
+            "side": side,
+            "timestamp": time.time()
+        }
+
+        # 1. Update In-Memory Order Flow Sliding Windows
+        append_trade(trade_slug, trade_payload)
+
+        # 2. Re-evaluate real-time signal metrics across all 4 timeframes
+        signal_data = generate_signal_score(trade_slug, price, r)
+
+        # 3. Cache the live Signal1Score inside Redis with a 5-minute TTL
+        try:
+            r.setex(f"signal:1:score:{trade_slug}", 300, json.dumps(signal_data))
+        except Exception as re:
+            logger.error(f"Redis signal caching failure for {trade_slug}: {re}")
+
+        # 4. Drop the raw trade record into the database execution queue (existing logic)
         try:
             trade_write_queue.put_nowait({
-                "slug": slug,
+                "slug": trade_slug,
                 "market": details.get("market"),
                 "asset_id": str(details.get("asset_id")),
-                "price": details.get("price"),
-                "size": details.get("size"),
-                "usd": details.get("usd"),
-                "side": details.get("side"),
+                "price": price,
+                "size": size,
+                "usd": usd,
+                "side": side,
                 "question": details.get("question"),
                 "outcome": details.get("outcome"),
-                "timestamp": time.time(),
+                "timestamp": trade_payload["timestamp"],
             })
         except Full:
-            logger.warning(f"Database write queue capacity breached. Dropping stats for slug: {slug}")
+            logger.warning(f"Database write queue capacity breached. Dropping stats for slug: {trade_slug}")
 
+        # 5. Handle Telegram Notifications Path (existing logic)
         # Check if this trade was routed via the C++ Priority system
         # If it's a priority match, it triggers our notification routines immediately
         raw_trade_context = details.get("raw", {})
-        if raw_trade_context and details.get("usd", 0.0) > 0:
+        if raw_trade_context and usd > 0:
             # Check the original subscriptions map in Redis to find who needs the alert
             try:
-                subscribers = r.hgetall(f"subscriptions:{slug}")
+                subscribers = r.hgetall(f"subscriptions:{trade_slug}")
                 for cid, limit_str in subscribers.items():
-                    if details.get("usd", 0.0) >= float(limit_str):
+                    if usd >= float(limit_str):
                         threading.Thread(
                             target=send_telegram_alert,
                             args=(cid, details.get("text")),
@@ -364,7 +396,7 @@ def untrack_market(
             with streams_lock:
                 if slug in market_streams:
                     market_streams[slug].close()
-                    del market_streams[slug]
+                    market_streams.pop(slug, None)
             return {"message": f"Evicted stream context mapping for {slug}"}
     else:
         if stream_is_active:
@@ -392,3 +424,23 @@ def get_engine_metrics():
         "database_write_queue_depth": trade_write_queue.qsize(),
         "streams": stream_metrics
     }
+
+@app.get('/analytics/{slug}/signal1')
+def get_signal_one(slug: str):
+    """
+    Sub-millisecond retrieval of the latest calculated Order Flow Imbalance matrix.
+    Reads straight from the Redis memory layer to prevent hitting primary DB storage.
+    """
+    try:
+        cached_signal = r.get(f"signal:1:score:{slug}")
+        if not cached_signal:
+            raise HTTPException(
+                status_code=404, 
+                detail="Signal trace stale or not found for this market."
+            )
+        return json.loads(cached_signal)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Failed to query signal cache matrix for slug {slug}: {e}")
+        raise HTTPException(status_code=500, detail="Internal signal pipeline breakdown.")

@@ -279,6 +279,7 @@ class WebSocketOrderBook:
                     
                     text = f"{side} @ {price} ({usd:.2f}$), {question} {outcome}"
                     details = {
+                        "slug": self.slug,
                         "market": market_id,
                         "asset_id": asset_id,
                         "price": price,
