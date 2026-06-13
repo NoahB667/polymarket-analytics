@@ -23,7 +23,7 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     slug = context.args[0]
-    limit = 0
+    limit = 0.0
     if len(context.args) > 1:
         try:
             limit = float(context.args[1])
@@ -35,12 +35,12 @@ async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"Connecting to market: {slug} with limit > ${limit}")
 
     try:
-        if limit > 0:
-            url = f"{FASTAPI_URL}/get-live-trades/{slug}/{limit}"
-        else:
-            url = f"{FASTAPI_URL}/get-live-trades/{slug}"
+        url = f"{FASTAPI_URL}/get-live-trades/{slug}"
 
-        params = {'chat_id': chat_id}
+        params = {
+            'chat_id': chat_id,
+            'limit': limit
+        }
         
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, timeout=5.0)
@@ -64,7 +64,6 @@ async def untrack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     params = {'chat_id': chat_id}
 
     try:
-        # FIXED: Non-blocking async client for untrack operations
         async with httpx.AsyncClient() as client:
             response = await client.get(url, params=params, timeout=5.0)
             

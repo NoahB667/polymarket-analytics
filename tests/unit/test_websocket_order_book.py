@@ -85,7 +85,6 @@ def test_websocket_order_book_cpp_integration():
     assert details["size"] == 500.0
     assert details["usd"] == 250.0
     
-    # FIXED: String case assertion must perfectly match C++ upper-case normalization strings ("BUY")
     assert details["side"] == "BUY"
     assert details["question"] == "Will anti-gravity be solved?"
     assert details["outcome"] == "Yes"
