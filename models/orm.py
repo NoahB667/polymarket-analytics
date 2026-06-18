@@ -1,23 +1,17 @@
 """SQLAlchemy ORM models for the analytics platform."""
 
-from datetime import datetime
 from sqlalchemy import (
+    Boolean,
     Column,
-    DateTime,
     Float,
     Integer,
-    JSON,
     String,
     UniqueConstraint,
     Index,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
-
-_json_type = JSONB().with_variant(JSON, "sqlite")
-
 
 class Subscription(Base):
     """Tracks active Telegram subscriptions by chat and market slug."""
@@ -52,3 +46,22 @@ class Trade(Base):
     __table_args__ = (
         Index("idx_trade_slug_timestamp", "slug", "timestamp"),
     )
+
+class PriceImpactCheck(Base):
+    __tablename__ = 'price_impact_checks'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    slug = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=False)
+    asset_id = Column(String, nullable=False)
+    
+    direction = Column(String, nullable=False)            # "BUY" or "SELL"
+    entry_price = Column(Float, nullable=False)
+    entry_time = Column(Float, nullable=False)            # Epoch timestamp
+    
+    checkpoint_interval = Column(String, nullable=False)  # "5m", "15m", "1h", "4h", "24h"
+    target_check_time = Column(Float, nullable=False, index=True) # entry_time + offset_seconds
+    
+    check_price = Column(Float, nullable=True)
+    price_change_pct = Column(Float, nullable=True)
+    is_completed = Column(Boolean, default=False, nullable=False, index=True)

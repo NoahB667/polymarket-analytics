@@ -3,6 +3,11 @@ import threading
 import collections
 from typing import *
 
+import requests
+
+from db import get_db_session
+from models.orm import PriceImpactCheck
+
 market_windows = {}
 lock = threading.Lock()
 
@@ -101,3 +106,74 @@ def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
         },
         "updated_at": time.time()
     }
+
+def price_impact_evaluator_worker():
+    """
+    Background worker loop that scans the database for past-due price impact
+    tracking records and updates them against the live Polymarket CLOB endpoints.
+    """
+    print("Price Impact Evaluator Worker started successfully.", flush=True)
+    
+    while True:
+        try:
+            current_time = time.time()
+            
+            with get_db_session() as db:
+                # Query all active items whose target evaluation timestamps have been passed
+                pending_checks = db.query(PriceImpactCheck).filter(
+                    PriceImpactCheck.is_completed == False,
+                    PriceImpactCheck.target_check_time <= current_time
+                ).all()
+                
+                if pending_checks:
+                    print(f"Found {len(pending_checks)} pending price impact checks to evaluate.", flush=True)
+                    
+                    for check in pending_checks:
+                        # Query the live price midpoint from the Polymarket CLOB API using the asset token id
+                        url = f"https://clob.polymarket.com/midpoint?token_id={check.asset_id}"
+                        
+                        try:
+                            response = requests.get(url, timeout=5)
+                            
+                            if response.status_code == 200:
+                                data = response.json()
+                                current_price_str = data.get("midpoint")
+                                
+                                if current_price_str:
+                                    current_price = float(current_price_str)
+                                    entry_price = float(check.entry_price)
+                                    
+                                    # Calculate mathematical directional delta
+                                    price_diff = current_price - entry_price
+                                    pct_change = (price_diff / entry_price) * 100.0
+                                    
+                                    # Invert percentage calculation if the tracker logged a short position
+                                    if check.direction == "SELL":
+                                        pct_change = -pct_change
+                                        
+                                    check.check_price = current_price
+                                    check.price_change_pct = round(pct_change, 2)
+                                    check.is_completed = True
+                                    print(f"Evaluated ID {check.id} ({check.direction}): {pct_change:+.2f}%", flush=True)
+                                else:
+                                    print(f"Missing midpoint field structure for Asset ID: {check.asset_id}", flush=True)
+                                    
+                            elif response.status_code == 404:
+                                # Mark completed to evict the dead asset token ID from polling queues gracefully
+                                check.is_completed = True
+                                print(f"Asset ID {check.asset_id} returned 404. Marked completed to clear queue.", flush=True)
+                                
+                            else:
+                                print(f"API Error {response.status_code} evaluating Asset ID: {check.asset_id}", flush=True)
+                                
+                        except requests.RequestException as network_error:
+                            print(f"Network connection failure checking ID {check.id}: {network_error}", flush=True)
+                    
+                    # Flush the entire batch changes to database storage
+                    db.commit()
+                    
+        except Exception as general_error:
+            print(f"Critical exception inside worker tracking execution: {general_error}", flush=True)
+            
+        # Hold execution state before looking for the next past-due cycle
+        time.sleep(30)

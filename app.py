@@ -4,39 +4,24 @@ import asyncio
 import requests
 import json
 import time
-import logging
 from contextlib import contextmanager, asynccontextmanager
 from queue import Queue, Full
 from typing import Dict
 
-from fastapi import FastAPI, HTTPException, Depends, Query
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from fastapi import FastAPI, HTTPException, Query
 from telegram import Bot
 from dotenv import load_dotenv
-import redis
+from redis_config import r
+from db import engine, SessionLocal, get_db_session, logger
 
-from models.orm import Base, Subscription, Trade
+from models.orm import Base, PriceImpactCheck, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
-from analytics.order_flow import append_trade, generate_signal_score
+from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
+
 
 load_dotenv()
-logger = logging.getLogger("polymarket.api")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-REDIS_URL = os.getenv("REDIS_URL", "redis://polymarket_redis:6379/0")
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///polymarket.db")
-
-# Optimized Engine Configuration
-engine = create_engine(
-    DATABASE_URL,
-    pool_size=10,
-    max_overflow=20,
-    pool_pre_ping=True
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-r = redis.from_url(REDIS_URL, decode_responses=True)
 
 # Active C++ Core Streams
 market_streams: Dict[str, WebSocketOrderBook] = {}
@@ -45,7 +30,7 @@ streams_lock = threading.Lock()
 trade_write_queue: "Queue[dict]" = Queue(maxsize=50000)
 _writer_thread_started = False
 _pubsub_thread_started = False
-
+_evaluator_thread_started = False
 
 def db_writer_worker():
     """Drains allocation queue cleanly without locking up API requests."""
@@ -264,7 +249,7 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     
-    global _writer_thread_started, _pubsub_thread_started
+    global _writer_thread_started, _pubsub_thread_started, _evaluator_thread_started
     
     # 1. Start DB Writer Thread if not running
     if not _writer_thread_started:
@@ -275,6 +260,14 @@ async def lifespan(app: FastAPI):
     if not _pubsub_thread_started:
         threading.Thread(target=listen_for_subscription_broadcasts, daemon=True).start()
         _pubsub_thread_started = True
+    
+    # 3. Start Price Impact Evaluator Thread if not running
+    if not _evaluator_thread_started:
+        threading.Thread(
+            target=price_impact_evaluator_worker, 
+            daemon=True
+        ).start()
+        _evaluator_thread_started = True
 
     # Sync state tables non-blockingly on startup
     db = SessionLocal()
