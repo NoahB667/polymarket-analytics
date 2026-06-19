@@ -33,21 +33,45 @@ _pubsub_thread_started = False
 _evaluator_thread_started = False
 
 def db_writer_worker():
-    """Drains allocation queue cleanly without locking up API requests."""
+    """Drains allocation queue cleanly without locking up hot path API requests."""
     while True:
         try:
-            trade_data = trade_write_queue.get(timeout=1)
+            payload = trade_write_queue.get(timeout=1)
+            task_type = payload.pop("task_type", "RAW_TRADE") # Default to old schema mapping
+            
             db = SessionLocal()
             try:
-                trade = Trade(**trade_data)
-                db.add(trade)
-                db.commit()
+                if task_type == "PRICE_IMPACT_CHECK":
+                    # Deduplicate safely inside the background thread context
+                    already_tracking = db.query(PriceImpactCheck).filter_by(
+                        asset_id=payload["asset_id"],
+                        is_completed=False
+                    ).first()
+
+                    if not already_tracking:
+                        new_check = PriceImpactCheck(
+                            asset_id=payload["asset_id"],
+                            entry_price=payload["price"],
+                            direction=payload["direction"],
+                            target_check_time=payload["target_check_time"],
+                            is_completed=False
+                        )
+                        db.add(new_check)
+                        db.commit()
+                        logger.info(f"Async worker initialized price impact monitoring for asset: {payload['asset_id']}")
+                
+                else: # Handle standard RAW_TRADE tracking
+                    trade = Trade(**payload)
+                    db.add(trade)
+                    db.commit()
+                    
             except Exception as e:
                 db.rollback()
-                logger.error(f"Async DB write dropped out: {e}")
+                logger.error(f"Async DB worker transaction dropped out: {e}")
             finally:
                 db.close()
             trade_write_queue.task_done()
+            
         except Exception:
             continue
 
@@ -182,9 +206,25 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
         except Exception as re:
             logger.error(f"Redis signal caching failure for {trade_slug}: {re}")
 
+        SIGNAL_THRESHOLD = 0.85
+        EVALUATION_DELAY_SECONDS = 300
+
+        if abs(signal_data["score"]) >= SIGNAL_THRESHOLD:
+            try:
+                trade_write_queue.put_nowait({
+                    "task_type": "PRICE_IMPACT_CHECK",
+                    "asset_id": str(details.get("asset_id")),
+                    "price": price,
+                    "direction": signal_data["direction"],
+                    "target_check_time": time.time() + EVALUATION_DELAY_SECONDS
+                })
+            except Full:
+                logger.warning("Database write queue full! Dropping price impact tracking task.")
+
         # 4. Drop the raw trade record into the database execution queue (existing logic)
         try:
             trade_write_queue.put_nowait({
+                "task_type": "RAW_TRADE",
                 "slug": trade_slug,
                 "market": details.get("market"),
                 "asset_id": str(details.get("asset_id")),
