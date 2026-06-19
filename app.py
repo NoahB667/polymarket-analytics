@@ -56,6 +56,7 @@ def db_writer_worker():
                             entry_price=payload["price"],
                             direction=payload["direction"],
                             entry_time=payload["entry_time"],
+                            checkpoint_interval=payload["checkpoint_interval"],
                             target_check_time=payload["target_check_time"],
                             is_completed=False
                         )
@@ -222,6 +223,7 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
                     "price": price,
                     "direction": signal_data["direction"],
                     "entry_time": time.time(),
+                    "checkpoint_interval": "5m",
                     "target_check_time": time.time() + EVALUATION_DELAY_SECONDS
                 })
             except Full:
