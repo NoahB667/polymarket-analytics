@@ -51,6 +51,7 @@ def db_writer_worker():
                     if not already_tracking:
                         new_check = PriceImpactCheck(
                             slug=payload["slug"],
+                            market_id=payload["market_id"],
                             asset_id=payload["asset_id"],
                             entry_price=payload["price"],
                             direction=payload["direction"],
@@ -216,6 +217,7 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
                 trade_write_queue.put_nowait({
                     "task_type": "PRICE_IMPACT_CHECK",
                     "slug": trade_slug,
+                    "market_id": details.get("market"),
                     "asset_id": str(details.get("asset_id")),
                     "price": price,
                     "direction": signal_data["direction"],
