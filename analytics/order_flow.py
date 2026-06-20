@@ -137,7 +137,7 @@ def price_impact_evaluator_worker():
                             
                             if response.status_code == 200:
                                 data = response.json()
-                                current_price_str = data.get("midpoint")
+                                current_price_str = data.get("mid_price")
                                 
                                 if current_price_str:
                                     current_price = float(current_price_str)
