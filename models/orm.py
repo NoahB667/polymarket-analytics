@@ -9,9 +9,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Index,
 )
-from sqlalchemy.orm import declarative_base
-
-Base = declarative_base()
+from db import Base
 
 class Subscription(Base):
     """Tracks active Telegram subscriptions by chat and market slug."""
@@ -25,7 +23,6 @@ class Subscription(Base):
     __table_args__ = (
         UniqueConstraint("chat_id", "slug", name="_chat_slug_uc"),
     )
-
 
 class Trade(Base):
     """Raw trade data captured from the Polymarket websocket."""
@@ -65,3 +62,38 @@ class PriceImpactCheck(Base):
     check_price = Column(Float, nullable=True)
     price_change_pct = Column(Float, nullable=True)
     is_completed = Column(Boolean, default=False, nullable=False, index=True)
+
+class OnchainTrade(Base):
+    """Historical trade transactions pulled from Dune's Polygon data lake tables."""
+
+    __tablename__ = 'onchain_trades'
+    
+    blockchain_id = Column(String, primary_key=True, index=True) 
+    wallet_address = Column(String, nullable=False, index=True)
+    market_id = Column(String, nullable=False, index=True)
+    slug = Column(String, nullable=True, index=True)              
+    question = Column(String, nullable=True)
+    outcome = Column(String, nullable=True)
+    usd_volume = Column(Float, nullable=False)
+    entry_price = Column(Float, nullable=False)                  # Implied probability (0.0 to 1.0)
+    resolved_outcome = Column(String, nullable=True)             # Populated when market settles
+    realized_pnl = Column(Float, nullable=True)                  # Realized profit/loss in USDC
+    block_timestamp = Column(Float, nullable=False)              # Epoch float timestamp
+
+class WalletProfile(Base):
+    __tablename__ = 'wallet_profiles'
+
+    wallet_address = Column(String, primary_key=True, index=True)
+    total_trades = Column(Integer, default=0, nullable=False)
+    distinct_markets = Column(Integer, default=0, nullable=False)
+    
+    long_shot_attempts = Column(Integer, default=0, nullable=False) # Bets placed at entry_price <= 0.20
+    long_shot_wins = Column(Integer, default=0, nullable=False)     # Long-shots that hit
+    long_shot_win_rate = Column(Float, default=0.0, nullable=False)
+    
+    category_concentration = Column(Float, default=0.0, nullable=False) # % of trades in dominant sector
+    account_age_days = Column(Float, default=0.0, nullable=False)
+    average_position_size = Column(Float, default=0.0, nullable=False)
+    
+    insider_score = Column(Float, default=0.0, nullable=False, index=True) # Final rating (0.0 to 1.0)
+    last_updated = Column(Float, nullable=False)
