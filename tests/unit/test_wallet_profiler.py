@@ -10,6 +10,7 @@ if str(root_path) not in sys.path:
 
 from blockchain.wallet_profiler import (
     profile_wallet,
+    profile_all_wallets,
     market_insider_risk,
     build_signal2_score,
 )
@@ -103,6 +104,82 @@ def test_market_insider_risk_fraction_from_high_score_wallets():
 
     assert risk == 0.75  # 3000 / (3000 + 1000)
     redis_client.setex.assert_called_once()
+
+
+def test_profile_wallet_survives_redis_cache_failure():
+    rows = [_onchain_row() for _ in range(3)]
+    db = _mock_db(rows)
+    redis_client = MagicMock()
+    redis_client.setex.side_effect = Exception("simulated redis failure")
+
+    profile = profile_wallet(db, "0xabc", redis_client)
+
+    assert profile.wallet_address == "0xabc"
+    db.merge.assert_called_once()  # DB persist still happens despite the redis failure
+
+
+def test_profile_all_wallets_isolates_per_wallet_failures():
+    db = MagicMock()
+    db.query.return_value.distinct.return_value.all.return_value = [("0xgood",), ("0xbad",)]
+
+    call_count = {"n": 0}
+
+    def filter_side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        filtered = MagicMock()
+        if call_count["n"] == 2:
+            # Second wallet's trade fetch blows up inside profile_wallet,
+            # before its internal try/except blocks, so the exception
+            # propagates up to profile_all_wallets.
+            filtered.all.side_effect = Exception("simulated failure for second wallet")
+        else:
+            filtered.all.return_value = [_onchain_row(wallet_address="0xgood")]
+        return filtered
+
+    db.query.return_value.filter.side_effect = filter_side_effect
+    db.query.return_value.filter_by.return_value.first.return_value = None
+    redis_client = MagicMock()
+
+    profiles = profile_all_wallets(db, redis_client)
+
+    assert len(profiles) == 1
+    assert profiles[0].wallet_address == "0xgood"
+    assert db.rollback.called
+
+
+def test_market_insider_risk_returns_zero_for_market_with_no_trades():
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = []
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+
+    risk = market_insider_risk(db, "empty-market", redis_client)
+
+    assert risk == 0.0
+
+
+def test_market_insider_risk_uses_redis_cache_hit():
+    db = MagicMock()
+    redis_client = MagicMock()
+    redis_client.get.return_value = b"0.42"
+
+    risk = market_insider_risk(db, "mkt-1", redis_client)
+
+    assert risk == 0.42
+    db.query.assert_not_called()  # cache hit means no DB query needed
+
+
+def test_market_insider_risk_survives_redis_failures():
+    rows = [_onchain_row(wallet_address="0xhigh", usd_volume=1000.0)]
+    db = _mock_db(rows)
+    db.query.return_value.filter_by.return_value.first.return_value = SimpleNamespace(insider_score=0.9)
+    redis_client = MagicMock()
+    redis_client.get.side_effect = Exception("redis read boom")
+    redis_client.setex.side_effect = Exception("redis write boom")
+
+    risk = market_insider_risk(db, "mkt-1", redis_client)
+
+    assert risk == 1.0  # still computes correctly despite both redis failures
 
 
 def test_build_signal2_score_confidence_formula():
