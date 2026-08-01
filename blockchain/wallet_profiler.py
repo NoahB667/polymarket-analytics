@@ -131,6 +131,7 @@ def profile_all_wallets(db: Any, redis_client: Any) -> List[Any]:
         try:
             profiles.append(profile_wallet(db, address, redis_client))
         except Exception as e:
+            db.rollback()
             logger.error(f"Skipping wallet {address} after profiling failure: {e}")
     return profiles
 
