@@ -170,18 +170,12 @@ def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Sc
     rows = db.query(OnchainTrade).filter(OnchainTrade.market_id == market_id).all()
     wallet_addresses = set(row.wallet_address for row in rows)
 
-    # Dedup on the identity of the returned WalletProfile record (not just
-    # the loop count) so a wallet whose lookup resolves to a record we've
-    # already counted is not double-counted in the sample. Keyed by id()
-    # rather than placed in a set directly since ORM/DTO records are not
-    # guaranteed hashable.
-    profiles_found: Dict[int, Any] = {}
+    insider_scores = []
     for address in wallet_addresses:
         wallet_profile = db.query(WalletProfileORM).filter_by(wallet_address=address).first()
         if wallet_profile is not None:
-            profiles_found[id(wallet_profile)] = wallet_profile
+            insider_scores.append(wallet_profile.insider_score)
 
-    insider_scores = [wp.insider_score for wp in profiles_found.values()]
     sample_size = len(insider_scores)
     high_score_wallet_count = sum(1 for s in insider_scores if s > HIGH_INSIDER_SCORE_THRESHOLD)
     avg_insider_score = sum(insider_scores) / sample_size if sample_size > 0 else 0.0

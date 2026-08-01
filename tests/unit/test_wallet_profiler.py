@@ -94,10 +94,12 @@ def test_build_signal2_score_confidence_formula():
     db = _mock_db(rows)
     redis_client = MagicMock()
     redis_client.get.return_value = None
-    db.query.return_value.filter_by.return_value.first.return_value = SimpleNamespace(insider_score=0.8)
+    db.query.return_value.filter_by.return_value.first.side_effect = (
+        lambda *a, **k: SimpleNamespace(insider_score=0.8)
+    )
 
     signal = build_signal2_score(db, "mkt-1", redis_client)
 
     assert signal.market_id == "mkt-1"
-    assert signal.sample_size == 1  # distinct wallets found via WalletProfile lookups (mocked to 1 unique)
+    assert signal.sample_size == 10  # 10 distinct wallets, each with its own WalletProfile record
     assert 0.0 <= signal.confidence <= 1.0
