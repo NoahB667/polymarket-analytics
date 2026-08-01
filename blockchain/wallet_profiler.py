@@ -219,14 +219,22 @@ def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Sc
     rows = db.query(OnchainTrade).filter(OnchainTrade.market_id == market_id).all()
     wallet_addresses = set(row.wallet_address for row in rows)
 
+    # insider_scores_by_wallet defaults unprofiled wallets to 0.0 so the risk
+    # (volume-weighted) calculation below can treat them as non-suspicious.
+    # known_insider_scores tracks ONLY wallets with an actual WalletProfile
+    # record — sample_size/avg_insider_score must reflect wallets genuinely
+    # analyzed, not be inflated by wallets that haven't been profiled yet.
     insider_scores_by_wallet: Dict[str, float] = {}
+    known_insider_scores: List[float] = []
     for address in wallet_addresses:
         wallet_profile = (
             db.query(WalletProfileORM).filter_by(wallet_address=address).first()
         )
-        insider_scores_by_wallet[address] = (
-            wallet_profile.insider_score if wallet_profile else 0.0
-        )
+        if wallet_profile is not None:
+            insider_scores_by_wallet[address] = wallet_profile.insider_score
+            known_insider_scores.append(wallet_profile.insider_score)
+        else:
+            insider_scores_by_wallet[address] = 0.0
 
     if risk is None:
         suspicious_volume = 0.0
@@ -244,12 +252,13 @@ def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Sc
         except Exception as e:
             logger.warning(f"Redis write failed for {cache_key}: {e}")
 
-    insider_scores = list(insider_scores_by_wallet.values())
-    sample_size = len(insider_scores)
+    sample_size = len(known_insider_scores)
     high_score_wallet_count = sum(
-        1 for s in insider_scores if s > HIGH_INSIDER_SCORE_THRESHOLD
+        1 for s in known_insider_scores if s > HIGH_INSIDER_SCORE_THRESHOLD
     )
-    avg_insider_score = sum(insider_scores) / sample_size if sample_size > 0 else 0.0
+    avg_insider_score = (
+        sum(known_insider_scores) / sample_size if sample_size > 0 else 0.0
+    )
     confidence = min(sample_size / SIGNAL2_SAMPLE_SIZE_NORMALIZER, 1.0) * risk
 
     return Signal2Score(

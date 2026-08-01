@@ -205,6 +205,37 @@ def test_build_signal2_score_confidence_formula():
     assert 0.0 <= signal.confidence <= 1.0
 
 
+def test_build_signal2_score_excludes_unprofiled_wallets_from_sample_size():
+    rows = [
+        _onchain_row(wallet_address="0xprofiled", usd_volume=1000.0),
+        _onchain_row(wallet_address="0xunprofiled", usd_volume=1000.0),
+    ]
+    db = _mock_db(rows)
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+
+    def fake_filter_by(*args, **kwargs):
+        address = kwargs.get("wallet_address")
+        result = MagicMock()
+        if address == "0xprofiled":
+            result.first.return_value = SimpleNamespace(insider_score=0.9)
+        else:
+            result.first.return_value = None  # no WalletProfile record yet
+        return result
+
+    db.query.return_value.filter_by.side_effect = fake_filter_by
+
+    signal = build_signal2_score(db, "mkt-1", redis_client)
+
+    # Only the profiled wallet counts toward sample_size/avg_insider_score —
+    # an unprofiled wallet must not be silently treated as a known score of 0.0.
+    assert signal.sample_size == 1
+    assert signal.avg_insider_score == 0.9
+    # But the unprofiled wallet's volume still counts toward total_volume in
+    # the risk fraction (treated as non-suspicious, not excluded entirely).
+    assert signal.market_insider_risk == 0.5  # 1000 suspicious / 2000 total
+
+
 def test_build_signal2_score_uses_redis_cache_hit():
     rows = [_onchain_row(wallet_address=f"0xw{i}") for i in range(3)]
     db = _mock_db(rows)
