@@ -62,6 +62,20 @@ def test_profile_wallet_upserts_and_caches():
     assert cache_key == "wallet:0xabc"
 
 
+def test_profile_wallet_survives_db_write_failure_and_rolls_back():
+    rows = [_onchain_row() for _ in range(3)]
+    db = _mock_db(rows)
+    db.merge.side_effect = Exception("simulated DB failure")
+    redis_client = MagicMock()
+
+    profile = profile_wallet(db, "0xabc", redis_client)
+
+    assert profile.wallet_address == "0xabc"
+    assert profile.total_trades == 3
+    db.rollback.assert_called_once()
+    redis_client.setex.assert_called_once()  # cache write still happens despite DB failure
+
+
 def test_market_insider_risk_fraction_from_high_score_wallets():
     rows = [
         _onchain_row(wallet_address="0xhigh", usd_volume=3000.0),
@@ -71,17 +85,19 @@ def test_market_insider_risk_fraction_from_high_score_wallets():
     redis_client = MagicMock()
     redis_client.get.return_value = None
 
-    def fake_wallet_query(*args, **kwargs):
-        wp = MagicMock()
-        wp.wallet_address = "0xhigh"
-        wp.insider_score = 0.9
-        return wp
+    # WalletProfile ORM lookups return high score for 0xhigh, low for 0xlow.
+    # Keyed by the filter_by(wallet_address=...) kwarg so this is independent
+    # of the (unordered) set iteration order used to dedupe wallets.
+    scores_by_wallet = {"0xhigh": 0.9, "0xlow": 0.1}
 
-    # WalletProfile ORM lookups return high score for 0xhigh, low for 0xlow
-    db.query.return_value.filter_by.return_value.first.side_effect = [
-        SimpleNamespace(insider_score=0.9),
-        SimpleNamespace(insider_score=0.1),
-    ]
+    def fake_filter_by(**kwargs):
+        result = MagicMock()
+        result.first.return_value = SimpleNamespace(
+            insider_score=scores_by_wallet[kwargs["wallet_address"]]
+        )
+        return result
+
+    db.query.return_value.filter_by.side_effect = fake_filter_by
 
     risk = market_insider_risk(db, "mkt-1", redis_client)
 

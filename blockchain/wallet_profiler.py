@@ -9,7 +9,7 @@ live trading, so this runs as a batch/retroactive job.
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import orjson
 
@@ -58,6 +58,7 @@ def profile_wallet(db: Any, wallet_address: str, redis_client: Any) -> WalletPro
     try:
         _upsert_wallet_profile(db, profile)
     except Exception as e:
+        db.rollback()
         logger.error(f"Failed to persist WalletProfile for {wallet_address}: {e}")
 
     try:
@@ -116,6 +117,13 @@ def profile_all_wallets(db: Any, redis_client: Any) -> List[Any]:
 
     Best-effort per wallet: a failure profiling one wallet is logged and
     skipped, it does not stop the batch.
+
+    Args:
+        db: SQLAlchemy session.
+        redis_client: Redis client (matches the redis_config.r interface).
+
+    Returns:
+        List of scored WalletProfile DTOs, one per successfully profiled wallet.
     """
     wallet_addresses = [row[0] for row in db.query(OnchainTrade.wallet_address).distinct().all()]
     profiles = []
@@ -131,6 +139,15 @@ def market_insider_risk(db: Any, market_id: str, redis_client: Any) -> float:
     """Fraction of a market's on-chain volume that came from high insider-score wallets.
 
     Caches the result at market:insider_risk:{market_id} for MARKET_RISK_CACHE_TTL_SECS.
+
+    Args:
+        db: SQLAlchemy session.
+        market_id: Market to evaluate.
+        redis_client: Redis client (matches the redis_config.r interface).
+
+    Returns:
+        Fraction (0.0-1.0) of the market's on-chain volume attributable to
+        wallets whose insider_score exceeds HIGH_INSIDER_SCORE_THRESHOLD.
     """
     cache_key = f"market:insider_risk:{market_id}"
     try:
@@ -144,13 +161,17 @@ def market_insider_risk(db: Any, market_id: str, redis_client: Any) -> float:
     if not rows:
         return 0.0
 
+    wallet_addresses = set(row.wallet_address for row in rows)
+    insider_scores_by_wallet: Dict[str, float] = {}
+    for address in wallet_addresses:
+        wallet_profile = db.query(WalletProfileORM).filter_by(wallet_address=address).first()
+        insider_scores_by_wallet[address] = wallet_profile.insider_score if wallet_profile else 0.0
+
     suspicious_volume = 0.0
     total_volume = 0.0
     for row in rows:
         total_volume += row.usd_volume
-        wallet_profile = db.query(WalletProfileORM).filter_by(wallet_address=row.wallet_address).first()
-        insider_score = wallet_profile.insider_score if wallet_profile else 0.0
-        if insider_score > HIGH_INSIDER_SCORE_THRESHOLD:
+        if insider_scores_by_wallet[row.wallet_address] > HIGH_INSIDER_SCORE_THRESHOLD:
             suspicious_volume += row.usd_volume
 
     risk = suspicious_volume / total_volume if total_volume > 0 else 0.0
@@ -164,7 +185,17 @@ def market_insider_risk(db: Any, market_id: str, redis_client: Any) -> float:
 
 
 def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Score:
-    """Assembles a Signal2Score for a market from its active wallets' insider scores."""
+    """Assembles a Signal2Score for a market from its active wallets' insider scores.
+
+    Args:
+        db: SQLAlchemy session.
+        market_id: Market to evaluate.
+        redis_client: Redis client (matches the redis_config.r interface).
+
+    Returns:
+        Signal2Score dataclass aggregating market_insider_risk, average
+        insider score, high-score wallet count, and sample-size confidence.
+    """
     risk = market_insider_risk(db, market_id, redis_client)
 
     rows = db.query(OnchainTrade).filter(OnchainTrade.market_id == market_id).all()
