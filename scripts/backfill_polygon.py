@@ -13,7 +13,9 @@ from blockchain.market_resolution_client import MarketResolution, MarketResoluti
 from analytics.wallet_intelligence import classify_category
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("backfill_polygon")
 
 
@@ -68,7 +70,11 @@ def run_backfill() -> None:
             blockchain_id = row.get("blockchain_id")
 
             try:
-                if db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first():
+                if (
+                    db.query(OnchainTrade)
+                    .filter_by(blockchain_id=blockchain_id)
+                    .first()
+                ):
                     continue
 
                 market_id = row.get("market_id")
@@ -96,7 +102,9 @@ def run_backfill() -> None:
                 batch_counter += 1
             except Exception as row_error:
                 db.rollback()
-                logger.error(f"Skipping row {blockchain_id} after ingestion failure: {row_error}")
+                logger.error(
+                    f"Skipping row {blockchain_id} after ingestion failure: {row_error}"
+                )
                 continue
 
         logger.info(f"Backfill complete! Committed {batch_counter} new trades.")

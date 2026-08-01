@@ -20,18 +20,18 @@ class WalletProfile:
     unique_markets: int
 
     # Long-shot performance
-    longshot_attempts: int          # trades where entry price < 0.20
-    longshot_wins: int              # correctly predicted long-shot outcomes
-    longshot_win_rate: float        # actual wins / attempts
+    longshot_attempts: int  # trades where entry price < 0.20
+    longshot_wins: int  # correctly predicted long-shot outcomes
+    longshot_win_rate: float  # actual wins / attempts
     avg_implied_prob_at_entry: float  # expected win rate (baseline)
 
     # Market concentration
-    top_categories: List[str]       # most traded categories, most-common first
-    category_concentration: float   # 1.0 = only one category
+    top_categories: List[str]  # most traded categories, most-common first
+    category_concentration: float  # 1.0 = only one category
 
     # Timing
     avg_days_before_resolution: float
-    new_account_flag: bool          # first_trade_date < 30 days ago
+    new_account_flag: bool  # first_trade_date < 30 days ago
     avg_bet_size: float
 
     # Score (populated by analytics.wallet_intelligence.calculate_insider_score)
@@ -45,8 +45,8 @@ class Signal2Score:
 
     market_id: str
     timestamp: float
-    market_insider_risk: float    # 0.0 to 1.0 (fraction suspicious volume)
+    market_insider_risk: float  # 0.0 to 1.0 (fraction suspicious volume)
     high_score_wallet_count: int  # count of wallets with score > 0.6
-    avg_insider_score: float      # average score of active wallets
-    sample_size: int              # number of wallets analyzed
-    confidence: float             # based on sample size
+    avg_insider_score: float  # average score of active wallets
+    sample_size: int  # number of wallets analyzed
+    confidence: float  # based on sample size

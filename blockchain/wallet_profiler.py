@@ -49,7 +49,11 @@ def profile_wallet(db: Any, wallet_address: str, redis_client: Any) -> WalletPro
     Returns:
         The scored models.dataclasses.WalletProfile.
     """
-    rows = db.query(OnchainTrade).filter(OnchainTrade.wallet_address == wallet_address).all()
+    rows = (
+        db.query(OnchainTrade)
+        .filter(OnchainTrade.wallet_address == wallet_address)
+        .all()
+    )
     trades = [_row_to_trade_dict(r) for r in rows]
 
     profile = compile_profile(wallet_address, trades)
@@ -125,7 +129,9 @@ def profile_all_wallets(db: Any, redis_client: Any) -> List[Any]:
     Returns:
         List of scored WalletProfile DTOs, one per successfully profiled wallet.
     """
-    wallet_addresses = [row[0] for row in db.query(OnchainTrade.wallet_address).distinct().all()]
+    wallet_addresses = [
+        row[0] for row in db.query(OnchainTrade.wallet_address).distinct().all()
+    ]
     profiles = []
     for address in wallet_addresses:
         try:
@@ -165,8 +171,12 @@ def market_insider_risk(db: Any, market_id: str, redis_client: Any) -> float:
     wallet_addresses = set(row.wallet_address for row in rows)
     insider_scores_by_wallet: Dict[str, float] = {}
     for address in wallet_addresses:
-        wallet_profile = db.query(WalletProfileORM).filter_by(wallet_address=address).first()
-        insider_scores_by_wallet[address] = wallet_profile.insider_score if wallet_profile else 0.0
+        wallet_profile = (
+            db.query(WalletProfileORM).filter_by(wallet_address=address).first()
+        )
+        insider_scores_by_wallet[address] = (
+            wallet_profile.insider_score if wallet_profile else 0.0
+        )
 
     suspicious_volume = 0.0
     total_volume = 0.0
@@ -204,12 +214,16 @@ def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Sc
 
     insider_scores = []
     for address in wallet_addresses:
-        wallet_profile = db.query(WalletProfileORM).filter_by(wallet_address=address).first()
+        wallet_profile = (
+            db.query(WalletProfileORM).filter_by(wallet_address=address).first()
+        )
         if wallet_profile is not None:
             insider_scores.append(wallet_profile.insider_score)
 
     sample_size = len(insider_scores)
-    high_score_wallet_count = sum(1 for s in insider_scores if s > HIGH_INSIDER_SCORE_THRESHOLD)
+    high_score_wallet_count = sum(
+        1 for s in insider_scores if s > HIGH_INSIDER_SCORE_THRESHOLD
+    )
     avg_insider_score = sum(insider_scores) / sample_size if sample_size > 0 else 0.0
     confidence = min(sample_size / SIGNAL2_SAMPLE_SIZE_NORMALIZER, 1.0) * risk
 

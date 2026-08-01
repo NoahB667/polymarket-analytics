@@ -13,7 +13,17 @@ from typing import Any, Dict, List, Optional
 from models.dataclasses import WalletProfile
 
 # -- Category classification -------------------------------------------------
-CATEGORY_KEYWORDS = ["fed", "rate", "election", "crypto", "sec", "peace", "israel", "iran", "taiwan"]
+CATEGORY_KEYWORDS = [
+    "fed",
+    "rate",
+    "election",
+    "crypto",
+    "sec",
+    "peace",
+    "israel",
+    "iran",
+    "taiwan",
+]
 DEFAULT_CATEGORY = "other"
 TOP_CATEGORIES_LIMIT = 3
 
@@ -118,7 +128,9 @@ def compile_profile(wallet_address: str, trades: List[Dict[str, Any]]) -> Wallet
 
         market_end_time = trade.get("market_end_time")
         if market_end_time is not None:
-            gap_days = (float(market_end_time) - float(trade["block_timestamp"])) / 86400.0
+            gap_days = (
+                float(market_end_time) - float(trade["block_timestamp"])
+            ) / 86400.0
             resolution_gaps_days.append(gap_days)
 
     # Win rate is computed over resolved long-shot trades only — an unresolved
@@ -126,14 +138,20 @@ def compile_profile(wallet_address: str, trades: List[Dict[str, Any]]) -> Wallet
     # must not silently deflate the rate by sitting in the denominator.
     # `longshot_attempts` still counts ALL long-shot trades (resolved or not),
     # matching the spec's field definition and the MIN_LONGSHOT_SAMPLE_SIZE gate.
-    longshot_win_rate = longshot_wins / resolved_longshot_count if resolved_longshot_count > 0 else 0.0
+    longshot_win_rate = (
+        longshot_wins / resolved_longshot_count if resolved_longshot_count > 0 else 0.0
+    )
     avg_implied_prob_at_entry = (
-        sum(longshot_entry_prices) / len(longshot_entry_prices) if longshot_entry_prices else 0.0
+        sum(longshot_entry_prices) / len(longshot_entry_prices)
+        if longshot_entry_prices
+        else 0.0
     )
 
     top_categories = [c for c, _ in category_counts.most_common(TOP_CATEGORIES_LIMIT)]
     max_category_count = max(category_counts.values()) if category_counts else 0
-    category_concentration = max_category_count / total_trades if total_trades > 0 else 0.0
+    category_concentration = (
+        max_category_count / total_trades if total_trades > 0 else 0.0
+    )
 
     avg_days_before_resolution = (
         sum(resolution_gaps_days) / len(resolution_gaps_days)
@@ -174,12 +192,16 @@ def calculate_insider_score(profile: WalletProfile) -> float:
 
     if profile.longshot_attempts >= MIN_LONGSHOT_SAMPLE_SIZE:
         excess = profile.longshot_win_rate - profile.avg_implied_prob_at_entry
-        components["longshot_excess"] = min(excess * LONGSHOT_EXCESS_MULTIPLIER, LONGSHOT_EXCESS_WEIGHT)
+        components["longshot_excess"] = min(
+            excess * LONGSHOT_EXCESS_MULTIPLIER, LONGSHOT_EXCESS_WEIGHT
+        )
     else:
         components["longshot_excess"] = 0.0
     score += components["longshot_excess"]
 
-    components["category_concentration"] = profile.category_concentration * CATEGORY_CONCENTRATION_WEIGHT
+    components["category_concentration"] = (
+        profile.category_concentration * CATEGORY_CONCENTRATION_WEIGHT
+    )
     score += components["category_concentration"]
 
     if profile.new_account_flag and profile.avg_bet_size > NEW_ACCOUNT_MIN_BET_USD:
@@ -194,7 +216,10 @@ def calculate_insider_score(profile: WalletProfile) -> float:
         components["resolution_proximity"] = 0.0
     score += components["resolution_proximity"]
 
-    if profile.total_trades < FEW_TRADES_MAX_COUNT and profile.longshot_win_rate > FEW_TRADES_MIN_WIN_RATE:
+    if (
+        profile.total_trades < FEW_TRADES_MAX_COUNT
+        and profile.longshot_win_rate > FEW_TRADES_MIN_WIN_RATE
+    ):
         components["few_trades_high_winrate"] = FEW_TRADES_HIGH_WINRATE_WEIGHT
     else:
         components["few_trades_high_winrate"] = 0.0

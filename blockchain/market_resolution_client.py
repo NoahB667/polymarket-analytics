@@ -81,7 +81,9 @@ class MarketResolutionClient:
                         result.resolved_outcome = str(token.get("outcome"))
                         break
         except Exception as e:
-            logger.warning(f"CLOB market lookup failed for condition_id={condition_id}: {e}")
+            logger.warning(
+                f"CLOB market lookup failed for condition_id={condition_id}: {e}"
+            )
 
         self._cache[condition_id] = result
         return result
