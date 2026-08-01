@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("backfill_polygon")
 
 
-def run_backfill():
+def run_backfill() -> None:
     logger.info("Initializing raw historical Polygon on-chain backfill...")
 
     dune = DuneClient()
@@ -62,44 +62,47 @@ def run_backfill():
     db = SessionLocal()
     resolution_client = MarketResolutionClient()
 
+    batch_counter = 0
     try:
-        batch_counter = 0
         for row in dune.fetch_results_paginated(execution_id):
             blockchain_id = row.get("blockchain_id")
 
-            # Simple check: skip if already exists
-            if db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first():
+            try:
+                if db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first():
+                    continue
+
+                market_id = row.get("market_id")
+                resolution = (
+                    resolution_client.resolve_market(market_id)
+                    if market_id
+                    else MarketResolution(resolved_outcome=None, market_end_time=None)
+                )
+
+                raw_trade = OnchainTrade(
+                    blockchain_id=blockchain_id,
+                    wallet_address=row.get("wallet_address"),
+                    market_id=market_id,
+                    question=row.get("question"),
+                    outcome=row.get("outcome", "unknown"),
+                    category=classify_category(row.get("event_market_name", "")),
+                    usd_volume=float(row.get("usd_volume", 0.0)),
+                    entry_price=float(row.get("entry_price", 0.0)),
+                    resolved_outcome=resolution.resolved_outcome,
+                    market_end_time=resolution.market_end_time,
+                    block_timestamp=float(row.get("block_timestamp", time.time())),
+                )
+                db.add(raw_trade)
+                db.commit()
+                batch_counter += 1
+            except Exception as row_error:
+                db.rollback()
+                logger.error(f"Skipping row {blockchain_id} after ingestion failure: {row_error}")
                 continue
 
-            market_id = row.get("market_id")
-            resolution = (
-                resolution_client.resolve_market(market_id)
-                if market_id
-                else MarketResolution(resolved_outcome=None, market_end_time=None)
-            )
-
-            raw_trade = OnchainTrade(
-                blockchain_id=blockchain_id,
-                wallet_address=row.get("wallet_address"),
-                market_id=market_id,
-                question=row.get("question"),
-                outcome=row.get("outcome", "unknown"),
-                category=classify_category(row.get("event_market_name", "")),
-                usd_volume=float(row.get("usd_volume", 0.0)),
-                entry_price=float(row.get("entry_price", 0.0)),
-                resolved_outcome=resolution.resolved_outcome,
-                market_end_time=resolution.market_end_time,
-                block_timestamp=float(row.get("block_timestamp", time.time())),
-            )
-            db.add(raw_trade)
-            batch_counter += 1
-
-        db.commit()
         logger.info(f"Backfill complete! Committed {batch_counter} new trades.")
 
     except Exception as e:
-        db.rollback()
-        logger.error(f"Ingestion failed: {e}")
+        logger.error(f"Backfill pipeline failure: {e}")
     finally:
         db.close()
 
