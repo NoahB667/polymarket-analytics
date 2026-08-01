@@ -17,6 +17,7 @@ treat resolution data as always-optional.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -28,6 +29,14 @@ CLOB_MARKETS_URL = "https://clob.polymarket.com/markets"
 REQUEST_TIMEOUT_SECS = 10
 
 
+@dataclass
+class MarketResolution:
+    """Result of a CLOB market resolution lookup."""
+
+    resolved_outcome: Optional[str]
+    market_end_time: Optional[float]
+
+
 class MarketResolutionClient:
     """Looks up a market's resolved outcome and end time by condition_id.
 
@@ -37,14 +46,23 @@ class MarketResolutionClient:
     """
 
     def __init__(self) -> None:
-        self._cache: Dict[str, Dict[str, Optional[Any]]] = {}
+        self._cache: Dict[str, MarketResolution] = {}
 
-    def resolve_market(self, condition_id: str) -> Dict[str, Optional[Any]]:
-        """Returns {"resolved_outcome": Optional[str], "market_end_time": Optional[float]}."""
+    def resolve_market(self, condition_id: str) -> MarketResolution:
+        """Looks up a market's resolved outcome and end time by condition_id.
+
+        Args:
+            condition_id: The market's on-chain condition_id (hex string).
+
+        Returns:
+            A MarketResolution with resolved_outcome/market_end_time set to None
+            for any field that couldn't be determined (unknown market, network
+            failure, market not yet closed, or ambiguous/no-winner outcome).
+        """
         if condition_id in self._cache:
             return self._cache[condition_id]
 
-        result: Dict[str, Optional[Any]] = {"resolved_outcome": None, "market_end_time": None}
+        result = MarketResolution(resolved_outcome=None, market_end_time=None)
         try:
             response = requests.get(
                 f"{CLOB_MARKETS_URL}/{condition_id}", timeout=REQUEST_TIMEOUT_SECS
@@ -56,11 +74,11 @@ class MarketResolutionClient:
             response.raise_for_status()
             market = response.json()
 
-            result["market_end_time"] = _parse_end_time(market.get("end_date_iso"))
+            result.market_end_time = _parse_end_time(market.get("end_date_iso"))
             if market.get("closed"):
                 for token in market.get("tokens", []):
                     if token.get("winner"):
-                        result["resolved_outcome"] = str(token.get("outcome"))
+                        result.resolved_outcome = str(token.get("outcome"))
                         break
         except Exception as e:
             logger.warning(f"CLOB market lookup failed for condition_id={condition_id}: {e}")
@@ -69,10 +87,16 @@ class MarketResolutionClient:
         return result
 
 
-def _parse_end_time(end_date_iso: Optional[str]) -> Optional[float]:
+def _parse_end_time(end_date_iso: Optional[Any]) -> Optional[float]:
+    """Parses an ISO end-date string to a Unix timestamp.
+
+    Catches ValueError/TypeError/AttributeError so a malformed or
+    non-string end_date_iso only blanks this field, rather than
+    propagating out and suppressing an otherwise-successful outcome lookup.
+    """
     if not end_date_iso:
         return None
     try:
         return datetime.fromisoformat(end_date_iso.replace("Z", "+00:00")).timestamp()
-    except ValueError:
+    except (ValueError, TypeError, AttributeError):
         return None
