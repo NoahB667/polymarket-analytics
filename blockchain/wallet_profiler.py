@@ -9,7 +9,7 @@ live trading, so this runs as a batch/retroactive job.
 
 import logging
 import time
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import orjson
 
@@ -207,19 +207,44 @@ def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Sc
         Signal2Score dataclass aggregating market_insider_risk, average
         insider score, high-score wallet count, and sample-size confidence.
     """
-    risk = market_insider_risk(db, market_id, redis_client)
+    cache_key = f"market:insider_risk:{market_id}"
+    risk: Optional[float] = None
+    try:
+        cached = redis_client.get(cache_key)
+        if cached is not None:
+            risk = float(cached)
+    except Exception as e:
+        logger.warning(f"Redis read failed for {cache_key}, recomputing: {e}")
 
     rows = db.query(OnchainTrade).filter(OnchainTrade.market_id == market_id).all()
     wallet_addresses = set(row.wallet_address for row in rows)
 
-    insider_scores = []
+    insider_scores_by_wallet: Dict[str, float] = {}
     for address in wallet_addresses:
         wallet_profile = (
             db.query(WalletProfileORM).filter_by(wallet_address=address).first()
         )
-        if wallet_profile is not None:
-            insider_scores.append(wallet_profile.insider_score)
+        insider_scores_by_wallet[address] = (
+            wallet_profile.insider_score if wallet_profile else 0.0
+        )
 
+    if risk is None:
+        suspicious_volume = 0.0
+        total_volume = 0.0
+        for row in rows:
+            total_volume += row.usd_volume
+            if (
+                insider_scores_by_wallet[row.wallet_address]
+                > HIGH_INSIDER_SCORE_THRESHOLD
+            ):
+                suspicious_volume += row.usd_volume
+        risk = suspicious_volume / total_volume if total_volume > 0 else 0.0
+        try:
+            redis_client.setex(cache_key, MARKET_RISK_CACHE_TTL_SECS, risk)
+        except Exception as e:
+            logger.warning(f"Redis write failed for {cache_key}: {e}")
+
+    insider_scores = list(insider_scores_by_wallet.values())
     sample_size = len(insider_scores)
     high_score_wallet_count = sum(
         1 for s in insider_scores if s > HIGH_INSIDER_SCORE_THRESHOLD

@@ -120,7 +120,10 @@ def test_profile_wallet_survives_redis_cache_failure():
 
 def test_profile_all_wallets_isolates_per_wallet_failures():
     db = MagicMock()
-    db.query.return_value.distinct.return_value.all.return_value = [("0xgood",), ("0xbad",)]
+    db.query.return_value.distinct.return_value.all.return_value = [
+        ("0xgood",),
+        ("0xbad",),
+    ]
 
     call_count = {"n": 0}
 
@@ -172,7 +175,9 @@ def test_market_insider_risk_uses_redis_cache_hit():
 def test_market_insider_risk_survives_redis_failures():
     rows = [_onchain_row(wallet_address="0xhigh", usd_volume=1000.0)]
     db = _mock_db(rows)
-    db.query.return_value.filter_by.return_value.first.return_value = SimpleNamespace(insider_score=0.9)
+    db.query.return_value.filter_by.return_value.first.return_value = SimpleNamespace(
+        insider_score=0.9
+    )
     redis_client = MagicMock()
     redis_client.get.side_effect = Exception("redis read boom")
     redis_client.setex.side_effect = Exception("redis write boom")
@@ -194,5 +199,53 @@ def test_build_signal2_score_confidence_formula():
     signal = build_signal2_score(db, "mkt-1", redis_client)
 
     assert signal.market_id == "mkt-1"
-    assert signal.sample_size == 10  # 10 distinct wallets, each with its own WalletProfile record
+    assert (
+        signal.sample_size == 10
+    )  # 10 distinct wallets, each with its own WalletProfile record
     assert 0.0 <= signal.confidence <= 1.0
+
+
+def test_build_signal2_score_uses_redis_cache_hit():
+    rows = [_onchain_row(wallet_address=f"0xw{i}") for i in range(3)]
+    db = _mock_db(rows)
+    redis_client = MagicMock()
+    redis_client.get.return_value = b"0.42"
+    db.query.return_value.filter_by.return_value.first.side_effect = (
+        lambda *a, **k: SimpleNamespace(insider_score=0.8)
+    )
+
+    signal = build_signal2_score(db, "mkt-1", redis_client)
+
+    assert signal.market_insider_risk == 0.42
+    redis_client.setex.assert_not_called()  # cache hit skips recompute-and-write
+
+
+def test_build_signal2_score_survives_redis_read_failure():
+    rows = [_onchain_row(wallet_address=f"0xw{i}") for i in range(3)]
+    db = _mock_db(rows)
+    redis_client = MagicMock()
+    redis_client.get.side_effect = Exception("redis read boom")
+    db.query.return_value.filter_by.return_value.first.side_effect = (
+        lambda *a, **k: SimpleNamespace(insider_score=0.8)
+    )
+
+    signal = build_signal2_score(db, "mkt-1", redis_client)
+
+    assert signal.market_id == "mkt-1"
+    assert signal.sample_size == 3
+
+
+def test_build_signal2_score_survives_redis_write_failure():
+    rows = [_onchain_row(wallet_address=f"0xw{i}") for i in range(3)]
+    db = _mock_db(rows)
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+    redis_client.setex.side_effect = Exception("redis write boom")
+    db.query.return_value.filter_by.return_value.first.side_effect = (
+        lambda *a, **k: SimpleNamespace(insider_score=0.8)
+    )
+
+    signal = build_signal2_score(db, "mkt-1", redis_client)
+
+    assert signal.market_id == "mkt-1"
+    assert signal.sample_size == 3
