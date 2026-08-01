@@ -79,6 +79,8 @@ class OnchainTrade(Base):
     resolved_outcome = Column(String, nullable=True)             # Populated when market settles
     realized_pnl = Column(Float, nullable=True)                  # Realized profit/loss in USDC
     block_timestamp = Column(Float, nullable=False)              # Epoch float timestamp
+    category = Column(String, nullable=True, index=True)         # Coarse topic sector, from event_market_name
+    market_end_time = Column(Float, nullable=True)               # Epoch float; market's end_date_iso from CLOB
 
 class WalletProfile(Base):
     __tablename__ = 'wallet_profiles'
@@ -94,6 +96,11 @@ class WalletProfile(Base):
     category_concentration = Column(Float, default=0.0, nullable=False) # % of trades in dominant sector
     account_age_days = Column(Float, default=0.0, nullable=False)
     average_position_size = Column(Float, default=0.0, nullable=False)
-    
+
+    avg_implied_prob_at_entry = Column(Float, default=0.0, nullable=False)   # Baseline win-rate expectation
+    avg_days_before_resolution = Column(Float, default=0.0, nullable=False) # Avg gap between trade and market close
+    new_account_flag = Column(Boolean, default=False, nullable=False)
+    top_categories = Column(String, nullable=True)                # Comma-joined top sectors, most-common first
+
     insider_score = Column(Float, default=0.0, nullable=False, index=True) # Final rating (0.0 to 1.0)
     last_updated = Column(Float, nullable=False)
