@@ -72,9 +72,11 @@ def test_compile_profile_longshot_win_rate_uses_resolution():
         _trade(entry_price=0.18, outcome="Yes", resolved_outcome=None, block_timestamp=now),  # unresolved long shot
     ]
     profile = compile_profile("0xabc", trades)
-    assert profile.longshot_attempts == 4  # entry_price < 0.20
+    assert profile.longshot_attempts == 4  # entry_price < 0.20 (all long-shot trades, resolved or not)
     assert profile.longshot_wins == 2
-    assert profile.longshot_win_rate == 0.5
+    # win rate is over the 3 *resolved* long-shot trades only (2 wins / 3 resolved),
+    # not all 4 attempts -- the unresolved long shot must not deflate the denominator.
+    assert profile.longshot_win_rate == round(2 / 3, 4)
     assert profile.avg_implied_prob_at_entry == round((0.10 + 0.15 + 0.05 + 0.18) / 4, 4)
 
 
@@ -148,6 +150,28 @@ def test_calculate_insider_score_few_trades_high_winrate_component():
     profile = compile_profile("0xabc", trades)
     score = calculate_insider_score(profile)
     assert profile.score_components["few_trades_high_winrate"] == 0.10
+
+
+def test_calculate_insider_score_negative_excess_clamped_to_zero():
+    now = time.time()
+    # 6 long-shot attempts, all resolved as losses -> longshot_win_rate=0.0,
+    # well below avg_implied_prob_at_entry -> negative longshot_excess component
+    trades = [_trade(entry_price=0.15, outcome="Yes", resolved_outcome="No", block_timestamp=now)
+              for _ in range(6)]
+    profile = compile_profile("0xabc", trades)
+    score = calculate_insider_score(profile)
+    assert profile.score_components["longshot_excess"] < 0.0
+    assert score == 0.0
+
+
+def test_compile_profile_win_rate_excludes_unresolved_longshots_from_denominator():
+    now = time.time()
+    trades = [_trade(entry_price=0.05, outcome="Yes", resolved_outcome="Yes", block_timestamp=now)]
+    trades += [_trade(entry_price=0.05, outcome="Yes", resolved_outcome=None, block_timestamp=now)
+               for _ in range(5)]
+    profile = compile_profile("0xabc", trades)
+    assert profile.longshot_attempts == 6  # unchanged: still counts all long-shot trades
+    assert profile.longshot_win_rate == 1.0  # only resolved trades count toward the rate
 
 
 def test_calculate_insider_score_clamped_to_one():

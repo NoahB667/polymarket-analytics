@@ -98,6 +98,7 @@ def compile_profile(wallet_address: str, trades: List[Dict[str, Any]]) -> Wallet
     category_counts: Counter = Counter()
     longshot_attempts = 0
     longshot_wins = 0
+    resolved_longshot_count = 0
     longshot_entry_prices: List[float] = []
     resolution_gaps_days: List[float] = []
 
@@ -110,6 +111,7 @@ def compile_profile(wallet_address: str, trades: List[Dict[str, Any]]) -> Wallet
             longshot_entry_prices.append(entry_price)
             resolved_outcome = trade.get("resolved_outcome")
             if resolved_outcome is not None:
+                resolved_longshot_count += 1
                 outcome = str(trade.get("outcome", "")).strip().lower()
                 if outcome == str(resolved_outcome).strip().lower():
                     longshot_wins += 1
@@ -119,7 +121,12 @@ def compile_profile(wallet_address: str, trades: List[Dict[str, Any]]) -> Wallet
             gap_days = (float(market_end_time) - float(trade["block_timestamp"])) / 86400.0
             resolution_gaps_days.append(gap_days)
 
-    longshot_win_rate = longshot_wins / longshot_attempts if longshot_attempts > 0 else 0.0
+    # Win rate is computed over resolved long-shot trades only — an unresolved
+    # (still-open) long-shot bet cannot yet be scored as a win or loss, so it
+    # must not silently deflate the rate by sitting in the denominator.
+    # `longshot_attempts` still counts ALL long-shot trades (resolved or not),
+    # matching the spec's field definition and the MIN_LONGSHOT_SAMPLE_SIZE gate.
+    longshot_win_rate = longshot_wins / resolved_longshot_count if resolved_longshot_count > 0 else 0.0
     avg_implied_prob_at_entry = (
         sum(longshot_entry_prices) / len(longshot_entry_prices) if longshot_entry_prices else 0.0
     )
