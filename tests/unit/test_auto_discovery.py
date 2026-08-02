@@ -107,6 +107,99 @@ def test_fetch_candidate_markets_dedupes_by_slug():
     assert slugs == {"market-a", "market-b"}
 
 
+class FakeRedis:
+    """Minimal in-memory Redis stand-in supporting setex/pipeline(delete+hset+expire).
+
+    Just enough surface area to assert on final key/value state after
+    run_discovery_cycle's metadata pre-warm -- not a general-purpose fake.
+    """
+
+    def __init__(self):
+        self.strings = {}
+        self.hashes = {}
+        self.ttls = {}
+
+    def setex(self, key, ttl, value):
+        self.strings[key] = value
+        self.ttls[key] = ttl
+
+    def set(self, key, value):
+        self.strings[key] = value
+
+    def incr(self, key):
+        self.strings[key] = self.strings.get(key, 0) + 1
+
+    def pipeline(self):
+        return _FakeRedisPipeline(self)
+
+
+class _FakeRedisPipeline:
+    def __init__(self, parent: FakeRedis):
+        self._parent = parent
+        self._ops = []
+
+    def delete(self, key):
+        self._ops.append(("delete", key))
+        return self
+
+    def hset(self, key, mapping):
+        self._ops.append(("hset", key, mapping))
+        return self
+
+    def expire(self, key, ttl):
+        self._ops.append(("expire", key, ttl))
+        return self
+
+    def execute(self):
+        results = []
+        for op in self._ops:
+            if op[0] == "delete":
+                self._parent.hashes.pop(op[1], None)
+                results.append(1)
+            elif op[0] == "hset":
+                self._parent.hashes.setdefault(op[1], {}).update(op[2])
+                results.append(len(op[2]))
+            elif op[0] == "expire":
+                self._parent.ttls[op[1]] = op[2]
+                results.append(True)
+        self._ops = []
+        return results
+
+
+_TARIFF_MARKET_WITH_CONDITION_ID = {
+    **_TARIFF_MARKET,
+    "conditionId": "0xabc123def456",
+    "outcomes": '["Yes", "No"]',
+}
+
+
+def test_run_discovery_cycle_prewarms_metadata_keyed_on_market_id_with_outcomes_hash():
+    session_factory = _sqlite_session_factory()
+    fake_redis = FakeRedis()
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[dict(_TARIFF_MARKET_WITH_CONDITION_ID)]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            redis_client=fake_redis,
+            session_factory=session_factory,
+        )
+
+    market_id = "0xabc123def456"
+    slug = "us-china-tariffs-q3-2026"
+
+    # Written under the market id, not the slug.
+    assert fake_redis.strings[f"meta:question:{market_id}"] == _TARIFF_MARKET["question"]
+    assert f"meta:question:{slug}" not in fake_redis.strings
+
+    # Outcomes hash maps token_id -> outcome label, keyed on market id.
+    assert fake_redis.hashes[f"meta:outcomes:{market_id}"] == {"tok_1": "Yes", "tok_2": "No"}
+    assert fake_redis.ttls[f"meta:question:{market_id}"] == 86400
+    assert fake_redis.ttls[f"meta:outcomes:{market_id}"] == 86400
+
+
 def test_run_discovery_cycle_subscribes_new_qualifying_market():
     session_factory = _sqlite_session_factory()
     subscribed = []

@@ -125,6 +125,28 @@ def _extract_token_ids(market_obj: Dict[str, Any]) -> List[str]:
     return [str(token_ids)]
 
 
+def _extract_outcome_labels(market_obj: Dict[str, Any]) -> List[str]:
+    """Parses the "outcomes" field off a single Gamma market object into a flat list.
+
+    Gamma returns this as a JSON-encoded string array (e.g. '["Yes", "No"]')
+    positionally parallel to clobTokenIds -- mirrors _extract_token_ids'
+    parsing conventions for the same encoding quirks.
+    """
+    outcomes = market_obj.get("outcomes")
+    if outcomes is None:
+        return []
+    if isinstance(outcomes, (list, tuple)):
+        return [str(o) for o in outcomes]
+    if isinstance(outcomes, str):
+        try:
+            decoded = orjson.loads(outcomes)
+            return [str(o) for o in decoded] if isinstance(decoded, (list, tuple)) else [str(decoded)]
+        except orjson.JSONDecodeError:
+            stripped = outcomes.strip("[]")
+            return [p.strip().strip('"').strip("'") for p in stripped.split(",") if p.strip()]
+    return [str(outcomes)]
+
+
 def fetch_candidate_markets() -> List[Dict[str, Any]]:
     """Fetches and merges top-by-volume and recently-opened markets from Gamma.
 
@@ -251,7 +273,31 @@ def run_discovery_cycle(
                 ))
                 if redis_client is not None:
                     try:
-                        redis_client.setex(f"meta:question:{slug}", 86400, market.get("question", "N/A"))
+                        market_id = market.get("conditionId")
+                        if not market_id:
+                            logger.error(
+                                f"Auto-discovery: missing conditionId for {slug}, "
+                                f"cannot pre-warm metadata (reads are keyed on market id, not slug)"
+                            )
+                        else:
+                            redis_client.setex(
+                                f"meta:question:{market_id}", 86400, market.get("question", "N/A")
+                            )
+                            outcome_labels = _extract_outcome_labels(market)
+                            if outcome_labels and len(outcome_labels) == len(token_ids):
+                                outcomes_map = dict(zip(token_ids, outcome_labels))
+                                outcomes_hash_key = f"meta:outcomes:{market_id}"
+                                pipe = redis_client.pipeline()
+                                pipe.delete(outcomes_hash_key)
+                                pipe.hset(outcomes_hash_key, mapping=outcomes_map)
+                                pipe.expire(outcomes_hash_key, 86400)
+                                pipe.execute()
+                            else:
+                                logger.error(
+                                    f"Auto-discovery: outcome/token_id count mismatch for {slug} "
+                                    f"({len(outcome_labels)} outcomes vs {len(token_ids)} token_ids), "
+                                    f"skipping outcomes pre-warm"
+                                )
                     except Exception as e:
                         logger.error(f"Auto-discovery: failed to pre-warm metadata for {slug}: {e}")
                 time.sleep(API_DELAY_SECONDS)
