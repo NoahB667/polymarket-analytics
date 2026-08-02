@@ -145,6 +145,24 @@ def test_lookup_cached_metadata_returns_na_on_cache_miss():
     assert result == {"question": "N/A", "outcomes": {}}
 
 
+def test_lookup_cached_metadata_returns_question_when_outcomes_hash_missing():
+    """Regression test: run_discovery_cycle legitimately pre-warms only the
+    question (not the outcomes hash) when a market's outcome/token_id
+    counts don't match -- that partial cache hit must not be discarded.
+    """
+    manager = GlobalWebSocketManager(url="wss://example.test")
+    fake_redis = MagicMock()
+    fake_redis.pipeline.return_value.execute.return_value = (
+        "Will the Fed cut rates?",
+        {},  # hgetall on a missing/empty hash key returns {}
+    )
+    manager.redis_client = fake_redis
+
+    result = manager._lookup_cached_metadata("0xmarket123")
+
+    assert result == {"question": "Will the Fed cut rates?", "outcomes": {}}
+
+
 def test_lookup_cached_metadata_returns_na_on_redis_failure():
     """Verify Redis exception returns N/A placeholders and doesn't crash."""
     manager = GlobalWebSocketManager(url="wss://example.test")

@@ -97,8 +97,8 @@ class GlobalWebSocketManager:
                 pipe.get(question_key)
                 pipe.hgetall(outcomes_hash_key)
                 cached_question, cached_outcomes = pipe.execute()
-                if cached_question and cached_outcomes:
-                    return {"question": cached_question, "outcomes": cached_outcomes}
+                if cached_question:
+                    return {"question": cached_question, "outcomes": cached_outcomes or {}}
             except Exception as e:
                 logger.error(f"GlobalWebSocketManager metadata cache lookup failed for {market}: {e}")
 
