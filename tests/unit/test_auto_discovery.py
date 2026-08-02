@@ -318,6 +318,40 @@ def test_restore_active_subscriptions_uses_stored_token_ids_with_zero_api_calls(
     assert restored_calls == [("stored-market", ["tok_stored"])]
 
 
+def test_restore_active_subscriptions_isolates_per_row_failure():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="bad-market", question="Q?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_bad"], subscribed_at=_time.time(),
+        status="active",
+    ))
+    db.add(AutoSubscription(
+        slug="good-market", question="Q?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_good"], subscribed_at=_time.time(),
+        status="active",
+    ))
+    db.commit()
+    db.close()
+
+    restored_calls = []
+
+    def flaky_subscribe(slug, tids):
+        if slug == "bad-market":
+            raise RuntimeError("subscribe wiring failed")
+        restored_calls.append((slug, tids))
+
+    count = auto_discovery.restore_active_subscriptions(
+        subscribe_callback=flaky_subscribe,
+        session_factory=session_factory,
+    )
+
+    assert ("good-market", ["tok_good"]) in restored_calls
+    assert count == 1
+
+
 def test_run_scheduler_loop_restores_then_runs_one_cycle_then_stops():
     stop_event = threading.Event()
     cycle_calls = []
@@ -337,3 +371,44 @@ def test_run_scheduler_loop_restores_then_runs_one_cycle_then_stops():
         )
 
     assert cycle_calls == [1]
+
+
+def test_run_scheduler_loop_survives_cycle_exception_and_continues():
+    stop_event = threading.Event()
+    cycle_calls = []
+
+    def flaky_cycle(subscribe_callback, unsubscribe_callback, alert_callback, redis_client):
+        cycle_calls.append(1)
+        if len(cycle_calls) == 1:
+            raise RuntimeError("Gamma API outage")
+        stop_event.set()
+        return {"new": 0, "resolved": 0, "active": 0, "tier1": 0, "tier2": 0, "disk_used_pct": 0.0}
+
+    with patch.object(auto_discovery, "restore_active_subscriptions", return_value=0), \
+         patch.object(auto_discovery, "run_discovery_cycle", side_effect=flaky_cycle), \
+         patch.object(auto_discovery, "AUTO_DISCOVERY_INTERVAL_HOURS", 0.0):
+        auto_discovery.run_scheduler_loop(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            stop_event=stop_event,
+        )
+
+    assert len(cycle_calls) >= 2
+
+
+def test_run_scheduler_loop_disabled_returns_immediately_without_restore_or_cycle():
+    restore_calls = []
+    cycle_calls = []
+
+    with patch.object(auto_discovery, "AUTO_DISCOVERY_ENABLED", False), \
+         patch.object(auto_discovery, "restore_active_subscriptions", side_effect=lambda *a, **k: restore_calls.append(1)), \
+         patch.object(auto_discovery, "run_discovery_cycle", side_effect=lambda *a, **k: cycle_calls.append(1)):
+        auto_discovery.run_scheduler_loop(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+        )
+
+    assert restore_calls == []
+    assert cycle_calls == []

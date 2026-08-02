@@ -359,22 +359,26 @@ def restore_active_subscriptions(
         rows = db.query(AutoSubscription).filter_by(status="active").all()
         restored = 0
         for row in rows:
-            token_ids = row.token_ids
-            if not token_ids:
-                try:
-                    response = requests.get(f"{GAMMA_EVENTS_URL}?slug={row.slug}", timeout=10)
-                    response.raise_for_status()
-                    data = response.json()
-                    if data and data[0].get("markets"):
-                        token_ids = _extract_token_ids(data[0]["markets"][0])
-                        row.token_ids = token_ids
-                except Exception as e:
-                    logger.error(f"Auto-discovery: failed to refresh token_ids for {row.slug}: {e}")
-                    continue
-                time.sleep(API_DELAY_SECONDS)
-            if token_ids:
-                subscribe_callback(row.slug, token_ids)
-                restored += 1
+            try:
+                token_ids = row.token_ids
+                if not token_ids:
+                    try:
+                        response = requests.get(f"{GAMMA_EVENTS_URL}?slug={row.slug}", timeout=10)
+                        response.raise_for_status()
+                        data = response.json()
+                        if data and data[0].get("markets"):
+                            token_ids = _extract_token_ids(data[0]["markets"][0])
+                            row.token_ids = token_ids
+                    except Exception as e:
+                        logger.error(f"Auto-discovery: failed to refresh token_ids for {row.slug}: {e}")
+                        continue
+                    time.sleep(API_DELAY_SECONDS)
+                if token_ids:
+                    subscribe_callback(row.slug, token_ids)
+                    restored += 1
+            except Exception as e:
+                logger.error(f"Auto-discovery: failed to restore {row.slug}, skipping: {e}")
+                continue
         db.commit()
         return restored
     finally:
