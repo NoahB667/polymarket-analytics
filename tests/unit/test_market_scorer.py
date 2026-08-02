@@ -172,3 +172,21 @@ def test_select_tiered_markets_excludes_below_threshold():
     markets = [{"slug": "too-low", "score": 0.3}]
     selected = select_tiered_markets(markets, threshold=0.5, max_total=500)
     assert selected == []
+
+
+def test_select_tiered_markets_score_exactly_at_tier1_threshold_is_tier2():
+    from analytics.market_scorer import select_tiered_markets
+
+    markets = [{"slug": "exactly-0.8", "score": 0.8}]
+    selected = select_tiered_markets(markets, threshold=0.5, max_total=500)
+    assert len(selected) == 1
+    assert selected[0]["tier"] == 2
+
+
+def test_select_tiered_markets_score_exactly_at_threshold_is_included():
+    from analytics.market_scorer import select_tiered_markets
+
+    markets = [{"slug": "exactly-threshold", "score": 0.5}]
+    selected = select_tiered_markets(markets, threshold=0.5, max_total=500)
+    assert len(selected) == 1
+    assert selected[0]["tier"] == 2
