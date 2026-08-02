@@ -31,6 +31,26 @@ def test_remove_market_clears_routing_table_and_callback():
         assert "fed-rate-june" not in manager._callbacks
 
 
+def test_removing_last_market_sends_empty_subscription_to_clear_server_state():
+    """Regression test: without this, the server keeps streaming the last
+    subscription it received after all markets are removed, wasting
+    bandwidth and risking stale data delivery on reconnect.
+    """
+    manager = GlobalWebSocketManager(url="wss://example.test")
+    fake_ws = MagicMock()
+    fake_ws.sock.connected = True
+    manager.ws = fake_ws
+
+    manager.add_market("fed-rate-june", ["tok_1"], lambda d: None)
+    fake_ws.send.reset_mock()  # clear the subscribe-side send from add_market
+
+    manager.remove_market("fed-rate-june")
+
+    fake_ws.send.assert_called_once()
+    sent_payload = json.loads(fake_ws.send.call_args[0][0])
+    assert sent_payload == {"assets_ids": [], "type": "market"}
+
+
 import json
 from unittest.mock import MagicMock, patch
 

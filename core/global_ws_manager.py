@@ -64,12 +64,15 @@ class GlobalWebSocketManager:
             return list(self._routing_table.keys())
 
     def _resubscribe(self) -> None:
-        """Sends the FULL current asset_id list -- Polymarket replaces, not appends."""
+        """Sends the FULL current asset_id list -- Polymarket replaces, not appends.
+
+        Sent even when the list is empty (all markets removed) -- otherwise
+        the server keeps streaming the last subscription it received, which
+        wastes bandwidth and can re-deliver stale data on reconnect.
+        """
         if self.ws is None or self.ws.sock is None or not self.ws.sock.connected:
             return
         asset_ids = self.current_asset_ids()
-        if not asset_ids:
-            return
         try:
             self.ws.send(json.dumps({"assets_ids": asset_ids, "type": MARKET_CHANNEL}))
         except Exception as e:
