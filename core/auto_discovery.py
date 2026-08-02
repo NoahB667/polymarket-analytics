@@ -66,3 +66,42 @@ def disk_gate_level(used_pct: float) -> str:
     if used_pct >= DISK_WARNING_PCT:
         return "warning"
     return "normal"
+
+
+def diff_discovery_cycle(selected_slugs: set, active_misses: Dict[str, int]) -> Dict[str, Any]:
+    """Computes which markets are new, kept, missed, or resolved this cycle.
+
+    A market absent from `selected_slugs` is not dropped immediately -- its
+    consecutive_misses counter increments, and it's only reported as
+    resolved once that counter reaches RESOLVED_MISS_THRESHOLD.
+
+    Args:
+        selected_slugs: Slugs that qualified (scored + tiered) this cycle.
+        active_misses: Mapping of slug -> current consecutive_misses, for
+            every row currently `status='active'` in the DB.
+
+    Returns:
+        {"new_slugs": set, "kept_slugs": set,
+         "missed_slugs": Dict[str, int] (new miss count, still < threshold),
+         "resolved_slugs": set (miss count reached threshold)}
+    """
+    active_slugs = set(active_misses.keys())
+    new_slugs = selected_slugs - active_slugs
+    kept_slugs = selected_slugs & active_slugs
+    missing_slugs = active_slugs - selected_slugs
+
+    missed_slugs: Dict[str, int] = {}
+    resolved_slugs = set()
+    for slug in missing_slugs:
+        misses = active_misses[slug] + 1
+        if misses >= RESOLVED_MISS_THRESHOLD:
+            resolved_slugs.add(slug)
+        else:
+            missed_slugs[slug] = misses
+
+    return {
+        "new_slugs": new_slugs,
+        "kept_slugs": kept_slugs,
+        "missed_slugs": missed_slugs,
+        "resolved_slugs": resolved_slugs,
+    }
