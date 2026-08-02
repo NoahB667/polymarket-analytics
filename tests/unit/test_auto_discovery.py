@@ -53,13 +53,43 @@ import time as _time
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from db import Base
-from models.orm import AutoSubscription
+from models.orm import AutoSubscription, Trade
 
 
 def _sqlite_session_factory():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     return sessionmaker(bind=engine)
+
+
+def test_update_total_trades_collected_counts_per_market():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="market-a", question="Q?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_a"], subscribed_at=_time.time(), status="active",
+    ))
+    db.add(AutoSubscription(
+        slug="market-b", question="Q?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_b"], subscribed_at=_time.time(), status="resolved",
+    ))
+    for _ in range(3):
+        db.add(Trade(slug="market-a", price=0.5, size=1.0, usd=0.5, side="BUY", timestamp=_time.time()))
+    db.add(Trade(slug="market-b", price=0.5, size=1.0, usd=0.5, side="BUY", timestamp=_time.time()))
+    db.commit()
+    db.close()
+
+    db = session_factory()
+    auto_discovery._update_total_trades_collected(db)
+
+    row_a = db.query(AutoSubscription).filter_by(slug="market-a").first()
+    row_b = db.query(AutoSubscription).filter_by(slug="market-b").first()
+    assert row_a.total_trades_collected == 3
+    # market-b is resolved (not active) -- its count is not refreshed, stays 0
+    assert row_b.total_trades_collected == 0
+    db.close()
 
 
 _TARIFF_MARKET = {

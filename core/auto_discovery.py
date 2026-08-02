@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import orjson
 import requests
+from sqlalchemy import text
 
 from analytics.market_scorer import (
     backfill_to_minimum,
@@ -244,6 +245,29 @@ def fetch_candidate_markets() -> List[Dict[str, Any]]:
     return list(events.values())
 
 
+def _update_total_trades_collected(db) -> None:
+    """Refreshes AutoSubscription.total_trades_collected for every active market.
+
+    Uses a single correlated-subquery UPDATE (trade.slug is indexed) rather
+    than one COUNT(*) query per market, per reference/auto_discovery.md's
+    documented maintenance pattern. Best-effort: a failure here is logged
+    and swallowed -- this is a display/prioritization aid, not something
+    that should ever be allowed to break a discovery cycle.
+    """
+    try:
+        db.execute(text(
+            "UPDATE auto_subscription "
+            "SET total_trades_collected = ("
+            "    SELECT COUNT(*) FROM trade WHERE trade.slug = auto_subscription.slug"
+            ") "
+            "WHERE status = 'active'"
+        ))
+        db.commit()
+    except Exception as e:
+        logger.error(f"Auto-discovery: failed to update total_trades_collected: {e}")
+        db.rollback()
+
+
 def run_discovery_cycle(
     subscribe_callback: Callable[[str, List[str]], None],
     unsubscribe_callback: Callable[[str], None],
@@ -417,6 +441,8 @@ def run_discovery_cycle(
             logger.error(f"Auto-discovery: failed to commit discovery cycle: {e}")
             db.rollback()
             applied_new = set()
+
+        _update_total_trades_collected(db)
 
         tier1_count = db.query(AutoSubscription).filter_by(status="active", tier=1).count()
         tier2_count = db.query(AutoSubscription).filter_by(status="active", tier=2).count()
