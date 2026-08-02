@@ -289,3 +289,51 @@ def test_run_discovery_cycle_stays_active_when_unsubscribe_callback_raises():
     db.close()
 
     assert row.status == "active"
+
+
+import threading
+
+
+def test_restore_active_subscriptions_uses_stored_token_ids_with_zero_api_calls():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="stored-market", question="Q?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_stored"], subscribed_at=_time.time(),
+        status="active",
+    ))
+    db.commit()
+    db.close()
+
+    restored_calls = []
+    with patch("core.auto_discovery.requests.get") as mock_get:
+        count = auto_discovery.restore_active_subscriptions(
+            subscribe_callback=lambda slug, tids: restored_calls.append((slug, tids)),
+            session_factory=session_factory,
+        )
+
+    mock_get.assert_not_called()
+    assert count == 1
+    assert restored_calls == [("stored-market", ["tok_stored"])]
+
+
+def test_run_scheduler_loop_restores_then_runs_one_cycle_then_stops():
+    stop_event = threading.Event()
+    cycle_calls = []
+
+    def fake_cycle(subscribe_callback, unsubscribe_callback, alert_callback, redis_client):
+        cycle_calls.append(1)
+        stop_event.set()
+        return {"new": 0, "resolved": 0, "active": 0, "tier1": 0, "tier2": 0, "disk_used_pct": 0.0}
+
+    with patch.object(auto_discovery, "restore_active_subscriptions", return_value=0), \
+         patch.object(auto_discovery, "run_discovery_cycle", side_effect=fake_cycle):
+        auto_discovery.run_scheduler_loop(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            stop_event=stop_event,
+        )
+
+    assert cycle_calls == [1]

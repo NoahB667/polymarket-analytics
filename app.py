@@ -18,11 +18,13 @@ from models.orm import Base, PriceImpactCheck, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
 from core.global_ws_manager import GlobalWebSocketManager
+from core.auto_discovery import run_scheduler_loop
 
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 # Active C++ Core Streams
 market_streams: Dict[str, WebSocketOrderBook] = {}
@@ -32,6 +34,8 @@ trade_write_queue: "Queue[dict]" = Queue(maxsize=50000)
 _writer_thread_started = False
 _pubsub_thread_started = False
 _evaluator_thread_started = False
+_global_ws_started = False
+_auto_discovery_started = False
 
 def db_writer_worker():
     """Drains allocation queue cleanly without locking up hot path API requests."""
@@ -344,6 +348,30 @@ async def lifespan(app: FastAPI):
         ).start()
         _evaluator_thread_started = True
 
+    # 4. Start the shared WebSocket connection for auto-discovered markets
+    global _global_ws_started, _auto_discovery_started
+    if not _global_ws_started:
+        threading.Thread(target=global_ws_manager.run, daemon=True).start()
+        _global_ws_started = True
+
+    # 5. Start the auto-discovery scheduler thread
+    if not _auto_discovery_started:
+        def _admin_alert(message: str) -> None:
+            if ADMIN_CHAT_ID:
+                send_telegram_alert(ADMIN_CHAT_ID, message)
+
+        threading.Thread(
+            target=run_scheduler_loop,
+            kwargs={
+                "subscribe_callback": ensure_auto_market_stream,
+                "unsubscribe_callback": global_ws_manager.remove_market,
+                "alert_callback": _admin_alert,
+                "redis_client": r,
+            },
+            daemon=True,
+        ).start()
+        _auto_discovery_started = True
+
     # Sync state tables non-blockingly on startup
     db = SessionLocal()
     try:
@@ -371,6 +399,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
     market_streams.clear()
+    global_ws_manager.close()
 
 app = FastAPI(lifespan=lifespan)
 

@@ -339,3 +339,77 @@ def run_discovery_cycle(
         )
 
     return summary
+
+
+def restore_active_subscriptions(
+    subscribe_callback: Callable[[str, List[str]], None],
+    session_factory=SessionLocal,
+) -> int:
+    """Restores all active auto-tracked markets from the DB on startup.
+
+    Uses stored token_ids -- zero API calls in the common case. Falls back
+    to a fresh Gamma lookup (with a defensive sleep between calls) only for
+    rows missing token_ids, which should be rare.
+
+    Returns:
+        The number of markets restored (subscribe_callback invoked).
+    """
+    db = session_factory()
+    try:
+        rows = db.query(AutoSubscription).filter_by(status="active").all()
+        restored = 0
+        for row in rows:
+            token_ids = row.token_ids
+            if not token_ids:
+                try:
+                    response = requests.get(f"{GAMMA_EVENTS_URL}?slug={row.slug}", timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+                    if data and data[0].get("markets"):
+                        token_ids = _extract_token_ids(data[0]["markets"][0])
+                        row.token_ids = token_ids
+                except Exception as e:
+                    logger.error(f"Auto-discovery: failed to refresh token_ids for {row.slug}: {e}")
+                    continue
+                time.sleep(API_DELAY_SECONDS)
+            if token_ids:
+                subscribe_callback(row.slug, token_ids)
+                restored += 1
+        db.commit()
+        return restored
+    finally:
+        db.close()
+
+
+def run_scheduler_loop(
+    subscribe_callback: Callable[[str, List[str]], None],
+    unsubscribe_callback: Callable[[str], None],
+    alert_callback: Callable[[str], None],
+    redis_client=None,
+    stop_event: Optional[threading.Event] = None,
+) -> None:
+    """Restores prior state, runs an immediate cycle, then loops on schedule.
+
+    Intended as the target of a single daemon thread started from app.py's
+    lifespan. Never raises -- any cycle failure is logged and the loop
+    continues, so a transient Gamma API outage never permanently kills
+    discovery.
+    """
+    if not AUTO_DISCOVERY_ENABLED:
+        logger.info("Auto-discovery disabled via AUTO_DISCOVERY_ENABLED=false")
+        return
+
+    stop_event = stop_event or threading.Event()
+
+    try:
+        restored = restore_active_subscriptions(subscribe_callback)
+        logger.info(f"Auto-discovery: restored {restored} active markets from DB on startup")
+    except Exception as e:
+        logger.error(f"Auto-discovery: startup restore failed: {e}")
+
+    while not stop_event.is_set():
+        try:
+            run_discovery_cycle(subscribe_callback, unsubscribe_callback, alert_callback, redis_client)
+        except Exception as e:
+            logger.error(f"Auto-discovery: cycle failed, will retry next interval: {e}")
+        stop_event.wait(AUTO_DISCOVERY_INTERVAL_HOURS * 3600)
