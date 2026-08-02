@@ -137,6 +137,9 @@ class AutoSubscription(Base):
     slug = Column(String(200), nullable=False, unique=True)
     question = Column(String(500))
     category = Column(String(500))  # joined event tag labels -- can be long (many tags)
+    condition_id = Column(String(100), nullable=True)  # Gamma "conditionId", 0x-prefixed hex --
+    # the on-chain market identifier Dune's market_trades table keys on. Nullable since
+    # rows created before this column existed won't have it until re-discovered.
     market_score = Column(Float, nullable=False)
     tier = Column(Integer, nullable=False)  # 1, 2, or 3 (MIN_ACTIVE_MARKETS floor backfill)
     volume_24h = Column(Float)

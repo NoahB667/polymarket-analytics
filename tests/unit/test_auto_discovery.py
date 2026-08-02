@@ -317,6 +317,27 @@ def test_run_discovery_cycle_prewarms_metadata_keyed_on_market_id_with_outcomes_
     assert fake_redis.ttls[f"meta:outcomes:{market_id}"] == 86400
 
 
+def test_run_discovery_cycle_persists_condition_id():
+    """condition_id must be stored so the Dune wallet-intelligence backfill
+    can later filter on-chain trades by market without a slug->id lookup.
+    """
+    session_factory = _sqlite_session_factory()
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[dict(_TARIFF_MARKET_WITH_CONDITION_ID)]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    db = session_factory()
+    row = db.query(AutoSubscription).filter_by(slug="us-china-tariffs-q3-2026").first()
+    assert row.condition_id == "0xabc123def456"
+    db.close()
+
+
 def test_run_discovery_cycle_subscribes_new_qualifying_market():
     session_factory = _sqlite_session_factory()
     subscribed = []
@@ -367,6 +388,38 @@ def test_run_discovery_cycle_marks_resolved_after_two_consecutive_misses():
     db = session_factory()
     row = db.query(AutoSubscription).filter_by(slug="old-market").first()
     assert row.status == "resolved"
+    db.close()
+
+
+def test_run_discovery_cycle_self_heals_missing_condition_id_on_kept_market():
+    """Rows created before the condition_id column existed have it backfilled
+    for free the next time the market is re-fetched and kept active, using
+    the fresh conditionId already present in this cycle's Gamma data.
+    """
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="us-china-tariffs-q3-2026", question="Old?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_1", "tok_2"], subscribed_at=_time.time(),
+        last_seen_active=_time.time(), last_cycle_at=_time.time(),
+        status="active", consecutive_misses=0, condition_id=None,
+    ))
+    db.commit()
+    db.close()
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[dict(_TARIFF_MARKET_WITH_CONDITION_ID)]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    db = session_factory()
+    row = db.query(AutoSubscription).filter_by(slug="us-china-tariffs-q3-2026").first()
+    assert row.condition_id == "0xabc123def456"
     db.close()
 
 

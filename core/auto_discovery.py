@@ -346,6 +346,7 @@ def run_discovery_cycle(
                 token_ids = market.get("token_ids") or []
                 if not token_ids:
                     continue
+                market_id = market.get("conditionId")
                 # Call the real-world side effect FIRST -- only persist the
                 # AutoSubscription row if subscribe_callback actually
                 # succeeded, so DB state never claims a market is "active"
@@ -355,6 +356,7 @@ def run_discovery_cycle(
                     slug=slug,
                     question=market.get("question"),
                     category=market.get("category"),
+                    condition_id=market_id,
                     market_score=market["score"],
                     tier=market["tier"],
                     volume_24h=market.get("volume_24h"),
@@ -368,7 +370,6 @@ def run_discovery_cycle(
                 ))
                 if redis_client is not None:
                     try:
-                        market_id = market.get("conditionId")
                         if not market_id:
                             logger.error(
                                 f"Auto-discovery: missing conditionId for {slug}, "
@@ -407,6 +408,12 @@ def run_discovery_cycle(
                 row.consecutive_misses = 0
                 row.last_seen_active = now
                 row.last_cycle_at = now
+                if not row.condition_id:
+                    # Self-heal rows created before the condition_id column
+                    # existed (or where it was missing at insert time) --
+                    # this cycle already re-fetched the market, so the fresh
+                    # conditionId is available at zero extra API cost.
+                    row.condition_id = selected_by_slug[slug].get("conditionId")
             except Exception as e:
                 logger.error(f"Auto-discovery: failed to update kept market {slug}: {e}")
                 continue

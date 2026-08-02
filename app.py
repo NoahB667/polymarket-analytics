@@ -19,6 +19,7 @@ from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
 from core.global_ws_manager import GlobalWebSocketManager
 from core.auto_discovery import run_scheduler_loop
+from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop
 
 
 load_dotenv()
@@ -36,6 +37,7 @@ _pubsub_thread_started = False
 _evaluator_thread_started = False
 _global_ws_started = False
 _auto_discovery_started = False
+_wallet_intelligence_started = False
 
 def db_writer_worker():
     """Drains allocation queue cleanly without locking up hot path API requests."""
@@ -349,7 +351,7 @@ async def lifespan(app: FastAPI):
         _evaluator_thread_started = True
 
     # 4. Start the shared WebSocket connection for auto-discovered markets
-    global _global_ws_started, _auto_discovery_started
+    global _global_ws_started, _auto_discovery_started, _wallet_intelligence_started
     if not _global_ws_started:
         threading.Thread(target=global_ws_manager.run, daemon=True).start()
         _global_ws_started = True
@@ -371,6 +373,17 @@ async def lifespan(app: FastAPI):
             daemon=True,
         ).start()
         _auto_discovery_started = True
+
+    # 6. Start the daily wallet-intelligence (Dune) scheduler thread.
+    # WALLET_INTELLIGENCE_ENABLED defaults to false -- this is a no-op until
+    # explicitly enabled, since each cycle consumes real Dune query credits.
+    if not _wallet_intelligence_started:
+        threading.Thread(
+            target=run_wallet_intelligence_loop,
+            kwargs={"redis_client": r},
+            daemon=True,
+        ).start()
+        _wallet_intelligence_started = True
 
     # Sync state tables non-blockingly on startup
     db = SessionLocal()

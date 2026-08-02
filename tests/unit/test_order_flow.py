@@ -5,13 +5,6 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 import pytest
 
-sys.modules['polymarket_core'] = MagicMock()
-
-mock_bridge = MagicMock()
-mock_bridge.CoreEngineBridge.return_value.is_cpp_available.return_value = False
-sys.modules['core.cpp_bridge'] = mock_bridge
-sys.modules['core'] = MagicMock()
-
 root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
