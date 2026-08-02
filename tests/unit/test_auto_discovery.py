@@ -82,6 +82,56 @@ def test_extract_token_ids_handles_json_string_and_list():
     assert auto_discovery._extract_token_ids({}) == []
 
 
+def test_extract_category_joins_tag_labels():
+    event = {
+        "tags": [
+            {"label": "Sports", "slug": "sports"},
+            {"label": "MLB", "slug": "mlb"},
+            {"label": "baseball", "slug": "baseball"},
+        ]
+    }
+    assert auto_discovery._extract_category(event) == "Sports, MLB, baseball"
+
+
+def test_extract_category_returns_empty_string_when_no_tags():
+    assert auto_discovery._extract_category({}) == ""
+    assert auto_discovery._extract_category({"tags": []}) == ""
+    assert auto_discovery._extract_category({"tags": None}) == ""
+
+
+def test_extract_category_truncates_to_column_width():
+    """Regression test: a market with many tags produced a category string
+    that exceeded AutoSubscription.category's VARCHAR width and rolled back
+    an entire cycle's bulk insert in production.
+    """
+    event = {"tags": [{"label": f"tag-{i}-with-a-fairly-long-label"} for i in range(50)]}
+    result = auto_discovery._extract_category(event)
+    assert len(result) == auto_discovery.CATEGORY_MAX_LENGTH
+
+
+def test_merge_events_page_uses_event_tags_not_market_category():
+    """Regression test: Gamma's live API never populates market.category or
+    event.category (both always None) -- the real signal is event.tags.
+    Without pulling from tags, a sports market with a question that doesn't
+    literally say "sports"/"mlb" would slip past the category hard filter.
+    """
+    events = {}
+    raw_events = [{
+        "slug": "mlb-world-series-champion-2026",
+        "category": None,
+        "tags": [{"label": "Sports"}, {"label": "MLB"}, {"label": "baseball"}],
+        "markets": [{
+            "question": "Who will win the World Series?",
+            "category": None,
+            "clobTokenIds": '["t1", "t2"]',
+        }],
+    }]
+
+    auto_discovery._merge_events_page(events, raw_events)
+
+    assert events["mlb-world-series-champion-2026"]["category"] == "Sports, MLB, baseball"
+
+
 def test_fetch_candidate_markets_dedupes_by_slug():
     volume_response = [{"slug": "market-a", "markets": [{"clobTokenIds": '["t1"]'}]}]
     recent_response = [{"slug": "market-a", "markets": [{"clobTokenIds": '["t1"]'}]},
@@ -105,6 +155,43 @@ def test_fetch_candidate_markets_dedupes_by_slug():
 
     slugs = {c["slug"] for c in candidates}
     assert slugs == {"market-a", "market-b"}
+
+
+def test_fetch_candidate_markets_paginates_top_volume_source():
+    """Verify multiple full pages are fetched via offset, stopping on a short page."""
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    def _volume_page(offset, count):
+        return [
+            {"slug": f"vol-{offset + i}", "markets": [{"clobTokenIds": '["t"]'}]}
+            for i in range(count)
+        ]
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(dict(params))
+        if params["order"] == "volume24hr":
+            offset = params.get("offset", 0)
+            if offset == 0:
+                return FakeResponse(_volume_page(0, auto_discovery.TOP_VOLUME_PAGE_SIZE))
+            if offset == auto_discovery.TOP_VOLUME_PAGE_SIZE:
+                return FakeResponse(_volume_page(offset, 10))  # short page -- stop here
+            raise AssertionError("should not fetch a third page after a short page")
+        return FakeResponse([])
+
+    with patch("core.auto_discovery.requests.get", side_effect=fake_get):
+        candidates = auto_discovery.fetch_candidate_markets()
+
+    volume_calls = [c for c in calls if c["order"] == "volume24hr"]
+    assert len(volume_calls) == 2  # full page then short page, then stop
+    assert len(candidates) == auto_discovery.TOP_VOLUME_PAGE_SIZE + 10
 
 
 class FakeRedis:
@@ -298,6 +385,68 @@ def test_run_discovery_cycle_tier1_unblocked_and_tier2_blocked_same_cycle_disk_w
 
     assert subscribed == ["us-china-tariffs-q3-2026"]
     assert summary["new"] == 1
+
+
+def test_run_discovery_cycle_backfills_to_min_active_markets_when_disk_normal():
+    session_factory = _sqlite_session_factory()
+    tier1_market = dict(_TARIFF_MARKET)  # scores > 0.8
+
+    # Category-relevant (economics) but scores well below AUTO_DISCOVERY_THRESHOLD
+    # (0.5): base 0.4 + tiny volume/time/spread bumps only.
+    low_score_markets = []
+    for i in range(3):
+        m = {
+            "question": f"Will some economic indicator {i} happen?", "category": "economics",
+            "volume24hr": "500", "endDate": "2026-08-10T00:00:00Z",
+            "bestBid": "0.40", "bestAsk": "0.60", "outcomePrices": '["0.5", "0.5"]',
+            "closed": False, "slug": f"low-score-econ-{i}", "token_ids": [f"tok_low_{i}"],
+        }
+        low_score_markets.append(m)
+
+    subscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[tier1_market] + low_score_markets), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}), \
+         patch.object(auto_discovery, "MIN_ACTIVE_MARKETS", 4):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append(slug),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    # Tier 1 market plus all 3 low-scoring markets backfilled to reach the floor of 4.
+    assert set(subscribed) == {"us-china-tariffs-q3-2026", "low-score-econ-0", "low-score-econ-1", "low-score-econ-2"}
+    assert summary["tier3"] == 3
+
+    db = session_factory()
+    for i in range(3):
+        row = db.query(AutoSubscription).filter_by(slug=f"low-score-econ-{i}").first()
+        assert row.tier == 3
+    db.close()
+
+
+def test_run_discovery_cycle_does_not_backfill_when_disk_not_normal():
+    session_factory = _sqlite_session_factory()
+    low_score_market = {
+        "question": "Will some economic indicator happen?", "category": "economics",
+        "volume24hr": "500", "endDate": "2026-08-10T00:00:00Z",
+        "bestBid": "0.40", "bestAsk": "0.60", "outcomePrices": '["0.5", "0.5"]',
+        "closed": False, "slug": "low-score-econ", "token_ids": ["tok_low"],
+    }
+
+    subscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[low_score_market]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 75.0, "used_gb": 75.0, "total_gb": 100.0}), \
+         patch.object(auto_discovery, "MIN_ACTIVE_MARKETS", 50):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append(slug),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert subscribed == []
+    assert summary["tier3"] == 0
 
 
 def test_run_discovery_cycle_sleeps_once_per_new_market():

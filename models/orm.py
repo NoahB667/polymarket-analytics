@@ -136,9 +136,9 @@ class AutoSubscription(Base):
     id = Column(Integer, primary_key=True)
     slug = Column(String(200), nullable=False, unique=True)
     question = Column(String(500))
-    category = Column(String(100))
+    category = Column(String(500))  # joined event tag labels -- can be long (many tags)
     market_score = Column(Float, nullable=False)
-    tier = Column(Integer, nullable=False)  # 1 or 2
+    tier = Column(Integer, nullable=False)  # 1, 2, or 3 (MIN_ACTIVE_MARKETS floor backfill)
     volume_24h = Column(Float)
     days_remaining = Column(Float)
     token_ids = Column(JSON)  # ["token_id_1", "token_id_2"]

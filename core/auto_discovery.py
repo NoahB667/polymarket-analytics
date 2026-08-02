@@ -16,21 +16,37 @@ from typing import Any, Callable, Dict, List, Optional
 import orjson
 import requests
 
-from analytics.market_scorer import normalize_market, score_market, select_tiered_markets
+from analytics.market_scorer import (
+    backfill_to_minimum,
+    normalize_market,
+    score_market,
+    select_tiered_markets,
+)
 from db import SessionLocal
 from models.orm import AutoSubscription
 
 logger = logging.getLogger("polymarket.core.auto_discovery")
 
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-TOP_VOLUME_PARAMS = {"active": "true", "order": "volume24hr", "ascending": "false", "limit": 100}
-RECENT_PARAMS = {"active": "true", "order": "startDate", "ascending": "false", "limit": 50}
+# Gamma silently caps a single /events response at 100 rows regardless of the
+# requested `limit`, so reaching a broader candidate pool requires paginating
+# via `offset` rather than asking for a bigger limit.
+TOP_VOLUME_PAGE_SIZE = 100
+# Measured live against the real Gamma feed: ~7-8% of raw candidates pass the
+# category hard filter (most of Polymarket's volume is sports/esports). 10
+# pages (~1000 raw) reliably yields ~70-80 category-relevant candidates,
+# comfortably clearing a MIN_ACTIVE_MARKETS=50 floor with margin.
+TOP_VOLUME_PAGES = 10
+TOP_VOLUME_PARAMS = {"active": "true", "order": "volume24hr", "ascending": "false", "limit": TOP_VOLUME_PAGE_SIZE}
+RECENT_PARAMS = {"active": "true", "order": "startDate", "ascending": "false", "limit": 100}
 RESOLVED_MISS_THRESHOLD = 2
+CATEGORY_MAX_LENGTH = 500  # must stay <= AutoSubscription.category's VARCHAR width
 
 AUTO_DISCOVERY_ENABLED = os.getenv("AUTO_DISCOVERY_ENABLED", "true").lower() == "true"
-AUTO_DISCOVERY_INTERVAL_HOURS = float(os.getenv("AUTO_DISCOVERY_INTERVAL_HOURS", "6"))
+AUTO_DISCOVERY_INTERVAL_HOURS = float(os.getenv("AUTO_DISCOVERY_INTERVAL_HOURS", "2"))
 AUTO_DISCOVERY_THRESHOLD = float(os.getenv("AUTO_DISCOVERY_THRESHOLD", "0.5"))
 MAX_AUTO_MARKETS = int(os.getenv("MAX_AUTO_MARKETS", "500"))
+MIN_ACTIVE_MARKETS = int(os.getenv("MIN_ACTIVE_MARKETS", "50"))
 API_DELAY_SECONDS = float(os.getenv("AUTO_DISCOVERY_API_DELAY_SECONDS", "0.1"))
 NEW_MARKET_ALERT_THRESHOLD = 10
 
@@ -147,31 +163,84 @@ def _extract_outcome_labels(market_obj: Dict[str, Any]) -> List[str]:
     return [str(outcomes)]
 
 
+def _extract_category(event: Dict[str, Any]) -> str:
+    """Derives a category string from a Gamma event's tags.
+
+    Neither the event nor its nested market objects expose a flat
+    "category" field on the live API (verified directly -- both are always
+    None) despite reference/auto_discovery.md assuming one exists. The real
+    topic signal lives in event["tags"], a list of {"label": ..., "slug":
+    ...} objects (e.g. a market tagged "Sports"/"MLB" carries a tag with
+    label "Sports" even when the question text itself never says "MLB").
+    Joining the labels reconstructs an equivalent to what score_market's
+    keyword matching was designed to scan.
+    """
+    tags = event.get("tags") or []
+    labels = [tag.get("label") for tag in tags if isinstance(tag, dict) and tag.get("label")]
+    joined = ", ".join(labels)
+    # Defensive cap independent of the DB column width: a market with many
+    # tags produced a string long enough to fail the AutoSubscription.category
+    # column's VARCHAR limit and roll back an entire cycle's bulk insert --
+    # truncate here so scoring (keyword substring matching) still works fine
+    # on a prefix, regardless of how the column is sized.
+    return joined[:CATEGORY_MAX_LENGTH]
+
+
+def _merge_events_page(events: Dict[str, Dict[str, Any]], raw_events: List[Dict[str, Any]]) -> None:
+    """Flattens a page of Gamma /events results into `events`, keyed by slug."""
+    for event in raw_events:
+        slug = event.get("slug")
+        markets = event.get("markets") or []
+        if not slug or not markets:
+            continue
+        market = markets[0]
+        merged = dict(market)
+        merged["slug"] = slug
+        merged["token_ids"] = _extract_token_ids(market)
+        merged["category"] = _extract_category(event)
+        events[slug] = merged
+
+
 def fetch_candidate_markets() -> List[Dict[str, Any]]:
     """Fetches and merges top-by-volume and recently-opened markets from Gamma.
 
+    Gamma caps a single /events response at 100 rows regardless of the
+    requested `limit`, so the top-by-volume source is paginated via `offset`
+    across TOP_VOLUME_PAGES pages to reach a broader candidate pool -- this
+    matters for MIN_ACTIVE_MARKETS backfill, which needs enough raw
+    candidates to find category-relevant markets even below the normal
+    quality threshold. A failed page is logged and the loop stops early
+    (page requests are sequential/ordered by volume, so a failure partway
+    through still leaves the highest-volume pages already collected); the
+    cycle still proceeds with whatever was gathered.
+
     Returns a deduplicated (by slug) list of raw market dicts, each carrying
-    its raw fields plus flattened "slug" and "token_ids" keys. A failed
-    request to one endpoint is logged and skipped -- the cycle still
-    proceeds with whatever the other endpoint returned.
+    its raw fields plus flattened "slug" and "token_ids" keys.
     """
     events: Dict[str, Dict[str, Any]] = {}
-    for params in (TOP_VOLUME_PARAMS, RECENT_PARAMS):
+
+    for page in range(TOP_VOLUME_PAGES):
+        params = {**TOP_VOLUME_PARAMS, "offset": page * TOP_VOLUME_PAGE_SIZE}
         try:
             response = requests.get(GAMMA_EVENTS_URL, params=params, timeout=10)
             response.raise_for_status()
-            for event in response.json():
-                slug = event.get("slug")
-                markets = event.get("markets") or []
-                if not slug or not markets:
-                    continue
-                market = markets[0]
-                merged = dict(market)
-                merged["slug"] = slug
-                merged["token_ids"] = _extract_token_ids(market)
-                events[slug] = merged
+            page_events = response.json()
+            if not page_events:
+                break
+            _merge_events_page(events, page_events)
+            if len(page_events) < TOP_VOLUME_PAGE_SIZE:
+                break
         except Exception as e:
-            logger.error(f"Auto-discovery: Gamma API fetch failed ({params.get('order')}): {e}")
+            logger.error(f"Auto-discovery: Gamma API fetch failed (volume24hr page {page}): {e}")
+            break
+
+    try:
+        response = requests.get(GAMMA_EVENTS_URL, params=RECENT_PARAMS, timeout=10)
+        response.raise_for_status()
+        _merge_events_page(events, response.json())
+    except Exception as e:
+        logger.error(f"Auto-discovery: Gamma API fetch failed (startDate): {e}")
+
     return list(events.values())
 
 
@@ -232,6 +301,8 @@ def run_discovery_cycle(
     )
     if gate != "normal":
         selected = [m for m in selected if m["tier"] == 1]
+    else:
+        selected = backfill_to_minimum(selected, scored, MIN_ACTIVE_MARKETS, MAX_AUTO_MARKETS)
 
     selected_by_slug = {m["slug"]: m for m in selected}
 
@@ -349,23 +420,25 @@ def run_discovery_cycle(
 
         tier1_count = db.query(AutoSubscription).filter_by(status="active", tier=1).count()
         tier2_count = db.query(AutoSubscription).filter_by(status="active", tier=2).count()
+        tier3_count = db.query(AutoSubscription).filter_by(status="active", tier=3).count()
     finally:
         db.close()
 
-    active_count = tier1_count + tier2_count
+    active_count = tier1_count + tier2_count + tier3_count
     summary = {
         "new": len(applied_new),
         "resolved": len(diff["resolved_slugs"]),
         "active": active_count,
         "tier1": tier1_count,
         "tier2": tier2_count,
+        "tier3": tier3_count,
         "disk_used_pct": disk["used_pct"],
     }
 
     logger.info(
         f"Auto-discovery cycle complete: +{summary['new']} new, "
         f"-{summary['resolved']} resolved, {summary['active']} active "
-        f"(Tier 1: {summary['tier1']}, Tier 2: {summary['tier2']})"
+        f"(Tier 1: {summary['tier1']}, Tier 2: {summary['tier2']}, Floor: {summary['tier3']})"
     )
 
     if redis_client is not None:
@@ -373,6 +446,7 @@ def run_discovery_cycle(
             redis_client.set("auto:markets_total", active_count)
             redis_client.set("auto:markets_tier1", tier1_count)
             redis_client.set("auto:markets_tier2", tier2_count)
+            redis_client.set("auto:markets_tier3", tier3_count)
             redis_client.set("disk:usage_pct", disk["used_pct"])
             redis_client.incr("auto:cycles_total")
         except Exception as e:
@@ -381,7 +455,7 @@ def run_discovery_cycle(
     if summary["new"] > NEW_MARKET_ALERT_THRESHOLD:
         alert_callback(
             f"🔍 Auto-discovery: +{summary['new']} new markets "
-            f"(Tier 1: {tier1_count}, Tier 2: {tier2_count}, Total: {active_count})"
+            f"(Tier 1: {tier1_count}, Tier 2: {tier2_count}, Floor: {tier3_count}, Total: {active_count})"
         )
 
     return summary

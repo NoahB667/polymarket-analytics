@@ -190,3 +190,46 @@ def test_select_tiered_markets_score_exactly_at_threshold_is_included():
     selected = select_tiered_markets(markets, threshold=0.5, max_total=500)
     assert len(selected) == 1
     assert selected[0]["tier"] == 2
+
+
+def test_backfill_to_minimum_noop_when_already_at_target():
+    from analytics.market_scorer import backfill_to_minimum
+
+    selected = [{"slug": "a", "score": 0.9, "tier": 1}, {"slug": "b", "score": 0.6, "tier": 2}]
+    result = backfill_to_minimum(selected, scored_markets=selected, min_total=2, max_total=500)
+    assert result == selected
+
+
+def test_backfill_to_minimum_pulls_highest_scoring_below_threshold_markets():
+    from analytics.market_scorer import backfill_to_minimum, FLOOR_TIER
+
+    selected = [{"slug": "a", "score": 0.9, "tier": 1}]
+    scored = selected + [
+        {"slug": "b", "score": 0.3},
+        {"slug": "c", "score": 0.45},
+        {"slug": "d", "score": 0.1},
+    ]
+    result = backfill_to_minimum(selected, scored, min_total=3, max_total=500)
+
+    slugs = {m["slug"] for m in result}
+    assert slugs == {"a", "c", "b"}  # highest two below-threshold scores, not "d"
+    backfilled = {m["slug"]: m["tier"] for m in result if m["slug"] != "a"}
+    assert backfilled == {"c": FLOOR_TIER, "b": FLOOR_TIER}
+
+
+def test_backfill_to_minimum_excludes_zero_score_markets():
+    from analytics.market_scorer import backfill_to_minimum
+
+    selected = []
+    scored = [{"slug": "skip-me", "score": 0.0}]
+    result = backfill_to_minimum(selected, scored, min_total=5, max_total=500)
+    assert result == []
+
+
+def test_backfill_to_minimum_never_exceeds_max_total():
+    from analytics.market_scorer import backfill_to_minimum
+
+    selected = [{"slug": "a", "score": 0.9, "tier": 1}]
+    scored = selected + [{"slug": f"cand-{i}", "score": 0.4} for i in range(10)]
+    result = backfill_to_minimum(selected, scored, min_total=100, max_total=3)
+    assert len(result) == 3

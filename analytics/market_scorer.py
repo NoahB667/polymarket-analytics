@@ -234,3 +234,52 @@ def select_tiered_markets(
         m["tier"] = 2
 
     return tier1 + selected_tier2
+
+
+FLOOR_TIER = 3
+
+
+def backfill_to_minimum(
+    selected: List[Dict[str, Any]],
+    scored_markets: List[Dict[str, Any]],
+    min_total: int,
+    max_total: int,
+) -> List[Dict[str, Any]]:
+    """Backfills lower-confidence markets to reach a minimum tracked count.
+
+    Used when normal threshold-based tiering (Tier 1 + Tier 2) doesn't reach
+    `min_total` markets on its own. Pulls the next-highest-scoring markets
+    that passed the category hard filter (score > 0) but fell below
+    AUTO_DISCOVERY_THRESHOLD, tagging them FLOOR_TIER (3) so they stay
+    clearly distinguishable in the DB from quality-vetted Tier 1/2 markets
+    -- this is a data-volume floor, not a quality signal.
+
+    Args:
+        selected: Markets already chosen by select_tiered_markets (tier 1/2).
+        scored_markets: The full scored candidate pool for this cycle,
+            including markets below threshold, each with a "score" key.
+        min_total: Desired minimum total tracked markets.
+        max_total: Hard cap (MAX_AUTO_MARKETS) -- never exceeded even to
+            reach min_total.
+
+    Returns:
+        `selected` plus enough additional FLOOR_TIER markets (highest score
+        first among those not already selected and scoring > 0) to reach
+        min_total, capped at max_total. Returns `selected` unchanged if it
+        already meets or exceeds the (capped) target.
+    """
+    target = min(min_total, max_total)
+    deficit = target - len(selected)
+    if deficit <= 0:
+        return selected
+
+    selected_slugs = {m["slug"] for m in selected}
+    candidates = sorted(
+        (m for m in scored_markets if m["slug"] not in selected_slugs and m["score"] > 0),
+        key=lambda m: m["score"], reverse=True,
+    )
+    backfilled = candidates[:deficit]
+    for m in backfilled:
+        m["tier"] = FLOOR_TIER
+
+    return selected + backfilled
