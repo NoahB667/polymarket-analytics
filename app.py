@@ -17,11 +17,15 @@ from db import engine, SessionLocal, get_db_session, logger
 from models.orm import Base, PriceImpactCheck, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
+from core.global_ws_manager import GlobalWebSocketManager
+from core.auto_discovery import run_scheduler_loop
+from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop
 
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 
 # Active C++ Core Streams
 market_streams: Dict[str, WebSocketOrderBook] = {}
@@ -31,6 +35,9 @@ trade_write_queue: "Queue[dict]" = Queue(maxsize=50000)
 _writer_thread_started = False
 _pubsub_thread_started = False
 _evaluator_thread_started = False
+_global_ws_started = False
+_auto_discovery_started = False
+_wallet_intelligence_started = False
 
 def db_writer_worker():
     """Drains allocation queue cleanly without locking up hot path API requests."""
@@ -166,16 +173,17 @@ def get_token_ids(slug: str):
     except Exception as e:
         return None, str(e)
 
-def ensure_market_stream(slug: str) -> tuple[bool, str]:
-    """Spawns an isolated C++ memory pipeline connection for incoming tokens."""
-    if slug in market_streams:
-        return True, "Stream already active"
+def build_trade_callback(slug: str):
+    """Builds the hot-path trade callback for a given market slug.
 
-    assets_ids, error = get_token_ids(slug)
-    if error:
-        return False, error
-
-    # Streamlined unified dispatcher callback
+    Used by both the legacy per-market WebSocketOrderBook flow (user
+    /track subscriptions) and the GlobalWebSocketManager flow (auto-
+    discovered markets). Behavior is identical for both: Signal 1
+    updates, Redis caching, price-impact queueing, DB persistence, and
+    Telegram alerts gated on Redis subscribers -- which are always empty
+    for auto-tracked markets, so alerts are a no-op there with zero extra
+    logic needed.
+    """
     def on_trade_dispatched(details: dict):
         """
         Hot path pass-through.
@@ -265,8 +273,22 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
             except Exception as ex:
                 logger.error(f"Error checking redis alerts: {ex}")
 
+    return on_trade_dispatched
+
+
+def ensure_market_stream(slug: str) -> tuple[bool, str]:
+    """Spawns an isolated C++ memory pipeline connection for incoming tokens."""
+    if slug in market_streams:
+        return True, "Stream already active"
+
+    assets_ids, error = get_token_ids(slug)
+    if error:
+        return False, error
+
+    on_trade_dispatched = build_trade_callback(slug)
+
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-    
+
     market_connection = WebSocketOrderBook(
         channel_type="market",
         url=url,
@@ -287,10 +309,21 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
 
     t = threading.Thread(target=_run_lifecycle, daemon=True)
     t.start()
-    
+
     # Sync initial subscribers into C++ structures immediately
     market_connection.sync_subscriptions()
     return True, "Started"
+
+
+global_ws_manager = GlobalWebSocketManager(
+    url="wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    redis_client=r,
+)
+
+
+def ensure_auto_market_stream(slug: str, token_ids: list) -> None:
+    """Registers an auto-discovered market on the shared WebSocket connection."""
+    global_ws_manager.add_market(slug, token_ids, build_trade_callback(slug))
 
 
 @asynccontextmanager
@@ -316,6 +349,41 @@ async def lifespan(app: FastAPI):
             daemon=True
         ).start()
         _evaluator_thread_started = True
+
+    # 4. Start the shared WebSocket connection for auto-discovered markets
+    global _global_ws_started, _auto_discovery_started, _wallet_intelligence_started
+    if not _global_ws_started:
+        threading.Thread(target=global_ws_manager.run, daemon=True).start()
+        _global_ws_started = True
+
+    # 5. Start the auto-discovery scheduler thread
+    if not _auto_discovery_started:
+        def _admin_alert(message: str) -> None:
+            if ADMIN_CHAT_ID:
+                send_telegram_alert(ADMIN_CHAT_ID, message)
+
+        threading.Thread(
+            target=run_scheduler_loop,
+            kwargs={
+                "subscribe_callback": ensure_auto_market_stream,
+                "unsubscribe_callback": global_ws_manager.remove_market,
+                "alert_callback": _admin_alert,
+                "redis_client": r,
+            },
+            daemon=True,
+        ).start()
+        _auto_discovery_started = True
+
+    # 6. Start the daily wallet-intelligence (Dune) scheduler thread.
+    # WALLET_INTELLIGENCE_ENABLED defaults to false -- this is a no-op until
+    # explicitly enabled, since each cycle consumes real Dune query credits.
+    if not _wallet_intelligence_started:
+        threading.Thread(
+            target=run_wallet_intelligence_loop,
+            kwargs={"redis_client": r},
+            daemon=True,
+        ).start()
+        _wallet_intelligence_started = True
 
     # Sync state tables non-blockingly on startup
     db = SessionLocal()
@@ -344,6 +412,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
     market_streams.clear()
+    global_ws_manager.close()
 
 app = FastAPI(lifespan=lifespan)
 

@@ -5,6 +5,7 @@ from sqlalchemy import (
     Column,
     Float,
     Integer,
+    JSON,
     String,
     UniqueConstraint,
     Index,
@@ -125,3 +126,35 @@ class WalletProfile(Base):
         Float, default=0.0, nullable=False, index=True
     )  # Final rating (0.0 to 1.0)
     last_updated = Column(Float, nullable=False)
+
+
+class AutoSubscription(Base):
+    """Tracks markets subscribed to automatically by the discovery scheduler (Step 8.5)."""
+
+    __tablename__ = "auto_subscription"
+
+    id = Column(Integer, primary_key=True)
+    slug = Column(String(200), nullable=False, unique=True)
+    question = Column(String(500))
+    category = Column(String(500))  # joined event tag labels -- can be long (many tags)
+    condition_id = Column(String(100), nullable=True)  # Gamma "conditionId", 0x-prefixed hex --
+    # the on-chain market identifier Dune's market_trades table keys on. Nullable since
+    # rows created before this column existed won't have it until re-discovered.
+    market_score = Column(Float, nullable=False)
+    tier = Column(Integer, nullable=False)  # 1, 2, or 3 (MIN_ACTIVE_MARKETS floor backfill)
+    volume_24h = Column(Float)
+    days_remaining = Column(Float)
+    token_ids = Column(JSON)  # ["token_id_1", "token_id_2"]
+    subscribed_at = Column(Float, nullable=False)  # epoch timestamp
+    last_seen_active = Column(Float)
+    last_cycle_at = Column(Float)
+    status = Column(String(20), default="active", nullable=False)
+    # status values: "active", "resolved", "dropped"
+    consecutive_misses = Column(Integer, default=0, nullable=False)
+    total_trades_collected = Column(Integer, default=0, nullable=False)
+
+    __table_args__ = (
+        Index("idx_auto_sub_status", "status"),
+        Index("idx_auto_sub_tier", "tier"),
+        Index("idx_auto_sub_score", "market_score"),
+    )
