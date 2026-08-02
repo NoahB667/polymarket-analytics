@@ -135,3 +135,40 @@ def test_normalize_market_with_outcomePrices_empty_list_falls_back_to_default_pr
     assert normalized is not None
     from analytics.market_scorer import DEFAULT_PRICE
     assert _approx(normalized["price"], DEFAULT_PRICE)
+
+
+# -- Tiering and selection tests -----------------------------------------------
+
+
+def test_select_tiered_markets_tier1_always_included_uncapped():
+    from analytics.market_scorer import select_tiered_markets, TIER1_THRESHOLD
+
+    markets = [{"slug": f"tier1-{i}", "score": 0.9} for i in range(10)]
+    selected = select_tiered_markets(markets, threshold=0.5, max_total=5)
+
+    assert len(selected) == 10
+    assert all(m["tier"] == 1 for m in selected)
+
+
+def test_select_tiered_markets_fills_remaining_slots_with_best_tier2():
+    from analytics.market_scorer import select_tiered_markets
+
+    tier1 = [{"slug": "tier1-a", "score": 0.9}]
+    tier2 = [
+        {"slug": "tier2-low", "score": 0.55},
+        {"slug": "tier2-mid", "score": 0.65},
+        {"slug": "tier2-high", "score": 0.75},
+    ]
+    selected = select_tiered_markets(tier1 + tier2, threshold=0.5, max_total=3)
+
+    slugs = {m["slug"] for m in selected}
+    assert slugs == {"tier1-a", "tier2-high", "tier2-mid"}
+    assert "tier2-low" not in slugs
+
+
+def test_select_tiered_markets_excludes_below_threshold():
+    from analytics.market_scorer import select_tiered_markets
+
+    markets = [{"slug": "too-low", "score": 0.3}]
+    selected = select_tiered_markets(markets, threshold=0.5, max_total=500)
+    assert selected == []

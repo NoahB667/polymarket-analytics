@@ -190,3 +190,47 @@ def score_market(market: Dict[str, Any]) -> float:
     score += _longshot_bonus(market["price"])
 
     return min(score, MAX_SCORE)
+
+
+TIER1_THRESHOLD = 0.8
+
+
+def select_tiered_markets(
+    scored_markets: List[Dict[str, Any]],
+    threshold: float,
+    max_total: int,
+) -> List[Dict[str, Any]]:
+    """Filters and tiers scored markets, enforcing MAX_AUTO_MARKETS.
+
+    Tier 1 (score > TIER1_THRESHOLD) is always included, uncapped -- these
+    are never dropped for capacity. Tier 2 (threshold <= score <=
+    TIER1_THRESHOLD) fills whatever slots remain up to max_total, highest
+    score first.
+
+    Args:
+        scored_markets: dicts each containing at least a "score" float key.
+        threshold: minimum score for Tier 2 eligibility.
+        max_total: hard cap on Tier 1 + Tier 2 combined.
+
+    Returns:
+        The qualifying subset of scored_markets, each with a "tier" key
+        added (1 or 2). Markets scoring below `threshold` are excluded.
+    """
+    tier1 = sorted(
+        (m for m in scored_markets if m["score"] > TIER1_THRESHOLD),
+        key=lambda m: m["score"], reverse=True,
+    )
+    tier2 = sorted(
+        (m for m in scored_markets if threshold <= m["score"] <= TIER1_THRESHOLD),
+        key=lambda m: m["score"], reverse=True,
+    )
+
+    for m in tier1:
+        m["tier"] = 1
+
+    remaining_slots = max(max_total - len(tier1), 0)
+    selected_tier2 = tier2[:remaining_slots]
+    for m in selected_tier2:
+        m["tier"] = 2
+
+    return tier1 + selected_tier2
