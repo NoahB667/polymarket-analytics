@@ -33,6 +33,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy your Python application source files
 COPY . .
 
+# Install the private signal-core submodule (vendor/signal-core) as a package.
+# Requires the submodule to be checked out in the build context:
+#   git submodule update --init
+RUN pip install --no-cache-dir -e vendor/signal-core
+
 # Move the compiled binary into Python's global site-packages folder
 COPY --from=builder /build/cpp/build/polymarket_core*.so /usr/local/lib/python3.11/site-packages/
 

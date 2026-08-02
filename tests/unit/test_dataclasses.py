@@ -1,32 +1,11 @@
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
-from models.dataclasses import WalletProfile, Signal2Score
-
-
-def test_wallet_profile_defaults():
-    profile = WalletProfile(
-        wallet_address="0xabc",
-        first_trade_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        total_trades=10,
-        unique_markets=3,
-        longshot_attempts=5,
-        longshot_wins=2,
-        longshot_win_rate=0.4,
-        avg_implied_prob_at_entry=0.15,
-        top_categories=["fed", "crypto"],
-        category_concentration=0.6,
-        avg_days_before_resolution=2.5,
-        new_account_flag=True,
-        avg_bet_size=1500.0,
-    )
-    assert profile.insider_score == 0.0
-    assert profile.score_components == {}
+from models.dataclasses import Signal2Score
 
 
 def test_signal2_score_fields():
@@ -46,38 +25,3 @@ def test_signal2_score_fields():
     assert score.avg_insider_score == 0.55
     assert score.sample_size == 12
     assert score.confidence == 0.1008
-
-
-def test_wallet_profile_score_components_not_shared_between_instances():
-    profile_a = WalletProfile(
-        wallet_address="0xaaa",
-        first_trade_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        total_trades=1,
-        unique_markets=1,
-        longshot_attempts=0,
-        longshot_wins=0,
-        longshot_win_rate=0.0,
-        avg_implied_prob_at_entry=0.0,
-        top_categories=[],
-        category_concentration=0.0,
-        avg_days_before_resolution=0.0,
-        new_account_flag=False,
-        avg_bet_size=0.0,
-    )
-    profile_b = WalletProfile(
-        wallet_address="0xbbb",
-        first_trade_date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        total_trades=1,
-        unique_markets=1,
-        longshot_attempts=0,
-        longshot_wins=0,
-        longshot_win_rate=0.0,
-        avg_implied_prob_at_entry=0.0,
-        top_categories=[],
-        category_concentration=0.0,
-        avg_days_before_resolution=0.0,
-        new_account_flag=False,
-        avg_bet_size=0.0,
-    )
-    profile_a.score_components["x"] = 1.0
-    assert profile_b.score_components == {}

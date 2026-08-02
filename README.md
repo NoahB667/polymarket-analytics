@@ -20,6 +20,19 @@ Try the live bot on Telegram: **[@polymarket_live_trades_bot](https://t.me/polym
 - **Interface:** Telegram Bot API
 - **Infrastructure:** Docker, Docker Compose (Production deployment on DigitalOcean Droplet)
 
+## Setup
+
+This repo depends on a **private git submodule**, `vendor/signal-core`, which holds the
+calibrated trading-signal logic (`signal_core`). Cloning without access to that private
+repo leaves the scoring layer unavailable — the rest of the platform still builds, but
+anything importing `signal_core` will fail.
+
+```bash
+git submodule update --init
+pip install -e vendor/signal-core
+pip install -r requirements.txt
+```
+
 ### Commands
 - `/start` : Initialize the bot.
 - `/track <slug> [limit]` : Track a market.

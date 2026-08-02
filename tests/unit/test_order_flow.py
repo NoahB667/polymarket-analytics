@@ -52,24 +52,6 @@ def test_calculate_ofi_metrics():
     assert ofi_result == 0.50
 
 
-@patch('redis.Redis')
-def test_generate_signal_score_boundaries(mock_redis):
-    """Ensure scoring aggregation rules correctly bound calculated output vectors between -1 and 1."""
-    slug = "test-signal"
-    now = time.time()
-    
-    mock_redis.get.return_value = b"10000.0"
-    
-    for _ in range(5):
-        append_trade(slug, {"size": 5000.0, "side": "BUY", "timestamp": now})
-        
-    signal = generate_signal_score(slug, latest_price=0.15, redis_client=mock_redis)
-    
-    assert signal["direction"] == "BUY"
-    assert -1.0 <= signal["score"] <= 1.0
-    assert signal["score"] == 1.0
-
-
 @patch('analytics.order_flow.requests.get')
 @patch('analytics.order_flow.get_db_session')
 def test_price_impact_worker_math_and_404_handling(mock_get_db, mock_get):

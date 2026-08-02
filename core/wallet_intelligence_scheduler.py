@@ -25,7 +25,7 @@ from typing import Any, List, Optional
 from blockchain.dune_client import DuneClient
 from blockchain.market_resolution_client import MarketResolution, MarketResolutionClient
 from blockchain.wallet_profiler import profile_all_wallets
-from analytics.wallet_intelligence import classify_category
+from signal_core.wallet_intelligence import classify_category
 from db import SessionLocal
 from models.orm import AutoSubscription, OnchainTrade
 

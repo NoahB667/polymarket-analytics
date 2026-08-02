@@ -10,7 +10,7 @@ from db import SessionLocal, engine
 from models.orm import OnchainTrade, Base
 from blockchain.dune_client import DuneClient
 from blockchain.market_resolution_client import MarketResolution, MarketResolutionClient
-from analytics.wallet_intelligence import classify_category
+from signal_core.wallet_intelligence import classify_category
 
 load_dotenv()
 logging.basicConfig(

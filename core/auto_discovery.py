@@ -17,7 +17,7 @@ import orjson
 import requests
 from sqlalchemy import text
 
-from analytics.market_scorer import (
+from signal_core.market_scorer import (
     backfill_to_minimum,
     normalize_market,
     score_market,

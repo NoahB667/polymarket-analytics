@@ -9,3 +9,5 @@ __pycache__
 .cache
 *.so
 *.pyi
+/vendor/signal-core/
+docs/superpowers/plans/2026-08-02-signal-core-migration.md

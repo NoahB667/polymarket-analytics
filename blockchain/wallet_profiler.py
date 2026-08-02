@@ -1,5 +1,5 @@
 """I/O orchestration layer for wallet intelligence: reads OnchainTrade rows,
-scores wallets via analytics.wallet_intelligence, and persists results to
+scores wallets via signal_core.wallet_intelligence, and persists results to
 PostgreSQL (WalletProfile) and Redis (hot cache). Produces per-market
 Signal2Score aggregates.
 
@@ -14,14 +14,15 @@ from typing import Any, Dict, List, Optional
 import orjson
 
 from models.orm import OnchainTrade, WalletProfile as WalletProfileORM
-from models.dataclasses import Signal2Score, WalletProfile as WalletProfileDTO
-from analytics.wallet_intelligence import compile_profile, calculate_insider_score
+from models.dataclasses import Signal2Score
+from signal_core.models import WalletProfile as WalletProfileDTO
+from signal_core.wallet_intelligence import compile_profile, calculate_insider_score
+from signal_core.wallet_risk import HIGH_INSIDER_SCORE_THRESHOLD
 
 logger = logging.getLogger("polymarket.blockchain.wallet_profiler")
 
 WALLET_CACHE_TTL_SECS = 3600
 MARKET_RISK_CACHE_TTL_SECS = 300
-HIGH_INSIDER_SCORE_THRESHOLD = 0.6
 SIGNAL2_SAMPLE_SIZE_NORMALIZER = 50
 
 
