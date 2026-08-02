@@ -8,9 +8,11 @@ websocket_order_book.py -- user /track subscriptions keep using that path.
 import json
 import logging
 import threading
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from websocket import WebSocketApp
+from websocket_order_book import get_market_metadata
 
 logger = logging.getLogger("polymarket.core.global_ws_manager")
 
@@ -72,3 +74,69 @@ class GlobalWebSocketManager:
             self.ws.send(json.dumps({"assets_ids": asset_ids, "type": MARKET_CHANNEL}))
         except Exception as e:
             logger.error(f"GlobalWebSocketManager failed to send subscription update: {e}")
+
+    def _route_message(self, message: dict) -> None:
+        asset_id = str(message.get("asset_id", ""))
+        with self._lock:
+            slug = self._routing_table.get(asset_id)
+            callback = self._callbacks.get(slug) if slug else None
+        if not slug or not callback:
+            return
+
+        market_id = message.get("market")
+        metadata = get_market_metadata(market_id, self.redis_client)
+        question = metadata.get("question", "N/A")
+        outcome = metadata.get("outcomes", {}).get(asset_id, "N/A")
+        price = float(message.get("price", 0.0) or 0.0)
+        size = float(message.get("size", 0.0) or 0.0)
+        side = message.get("side", "UNKNOWN")
+        usd = price * size
+
+        callback({
+            "slug": slug,
+            "market": market_id,
+            "asset_id": asset_id,
+            "price": price,
+            "size": size,
+            "usd": usd,
+            "side": side,
+            "question": question,
+            "outcome": outcome,
+            "text": f"{side} @ {price} ({usd:.2f}$), {question} {outcome}",
+            "raw": message,
+        })
+
+    def on_message(self, ws, raw: str) -> None:
+        try:
+            stripped = raw.lstrip()
+            if not stripped:
+                return
+            data = json.loads(raw)
+            messages = data if isinstance(data, list) else [data]
+            for msg in messages:
+                if isinstance(msg, dict):
+                    self._route_message(msg)
+        except Exception as e:
+            logger.error(f"GlobalWebSocketManager failed to process message: {e}")
+
+    def on_open(self, ws) -> None:
+        self._resubscribe()
+
+    def run(self) -> None:
+        """Runs the connection forever, reconnecting with full re-subscription on drop."""
+        self._running = True
+        while self._running:
+            self.ws = WebSocketApp(url=self.url, on_message=self.on_message, on_open=self.on_open)
+            try:
+                self.ws.run_forever(ping_interval=PING_INTERVAL_SECONDS, ping_timeout=PING_TIMEOUT_SECONDS)
+            except Exception as e:
+                logger.error(f"GlobalWebSocketManager connection crashed: {e}")
+            if not self._running:
+                break
+            logger.info(f"GlobalWebSocketManager reconnecting in {RECONNECT_DELAY_SECONDS}s...")
+            time.sleep(RECONNECT_DELAY_SECONDS)
+
+    def close(self) -> None:
+        self._running = False
+        if self.ws:
+            self.ws.close()
