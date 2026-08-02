@@ -56,6 +56,22 @@ def test_score_market_skips_unlisted_category():
     assert score_market(market) == 0.0
 
 
+def test_score_market_skips_recurring_crypto_price_markets():
+    market = normalize_market(_raw_market(
+        question="Will the price of Bitcoin be above $54,000 on August 5?",
+        category="Bitcoin, Weekly, Multi Strikes, Crypto, Crypto Prices, Recurring, Hide From New",
+    ))
+    assert score_market(market) == 0.0
+
+
+def test_score_market_still_scores_crypto_regulation_markets():
+    market = normalize_market(_raw_market(
+        question="Clarity Act (H.R.3633) signed into law in 2026?",
+        category="Crypto, Trump, Politics, us law, Crypto Legal, Clarity Act",
+    ))
+    assert score_market(market) > 0.0
+
+
 def test_score_market_skips_already_closed_market():
     market = normalize_market(_raw_market(closed=True))
     assert score_market(market) == 0.0

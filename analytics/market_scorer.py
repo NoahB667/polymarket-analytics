@@ -17,6 +17,16 @@ SKIP_CATEGORY_KEYWORDS: List[str] = [
     "reality tv", "pop culture", "movies", "gaming",
 ]
 
+# Recurring crypto price-threshold markets ("Will BTC be above $X on <date>?")
+# carry a distinctive "Crypto Prices"/"Hit Price"/"Multi Strikes" tag set on
+# the live Gamma API -- they're closer to sports betting on a number than
+# insider-trading-relevant events, unlike genuine crypto regulation/legal
+# markets (SEC, ETF approval, stablecoin law), which keep scoring normally
+# via HIGH_VALUE_CATEGORY_KEYWORDS's "crypto"/"bitcoin"/etc entries below.
+CRYPTO_PRICE_SKIP_KEYWORDS: List[str] = [
+    "crypto prices", "hit price", "multi strikes",
+]
+
 HIGH_VALUE_CATEGORY_KEYWORDS: List[str] = [
     # Geopolitical
     "politics", "election", "geopolitics", "world", "military", "war",
@@ -179,6 +189,8 @@ def score_market(market: Dict[str, Any]) -> float:
     text = f"{market.get('category', '')} {market.get('question', '')}".lower()
 
     if any(keyword in text for keyword in SKIP_CATEGORY_KEYWORDS):
+        return 0.0
+    if any(keyword in text for keyword in CRYPTO_PRICE_SKIP_KEYWORDS):
         return 0.0
     if not any(keyword in text for keyword in HIGH_VALUE_CATEGORY_KEYWORDS):
         return 0.0
