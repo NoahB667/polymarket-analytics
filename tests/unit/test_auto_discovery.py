@@ -532,6 +532,53 @@ def test_run_discovery_cycle_does_not_backfill_when_disk_not_normal():
     assert summary["tier3"] == 0
 
 
+def test_run_discovery_cycle_keeps_existing_tier2_market_active_under_disk_pressure():
+    """Regression test: disk gating must only block NEW Tier 2 subscriptions.
+
+    An already-active Tier 2 market that still qualifies this cycle must be
+    treated as "kept" (consecutive_misses reset to 0, still active) even
+    when the disk gate is non-normal -- not as "missing", which would
+    eventually resolve/unsubscribe it purely due to transient disk pressure
+    that has nothing to do with whether the market itself is still relevant.
+    """
+    session_factory = _sqlite_session_factory()
+    tier2_market = {
+        "question": "Will a Bitcoin ETF get approved?", "category": "crypto",
+        "volume24hr": "12000", "endDate": "2099-01-01T00:00:00Z",
+        "bestBid": "0.40", "bestAsk": "0.45", "outcomePrices": '["0.42", "0.58"]',
+        "closed": False, "slug": "btc-etf-approval", "token_ids": ["tok_a"],
+    }
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="btc-etf-approval", question="Will a Bitcoin ETF get approved?", category="crypto",
+        market_score=0.75, tier=2, volume_24h=12000.0, days_remaining=1000.0,
+        token_ids=["tok_a"], subscribed_at=_time.time(),
+        last_seen_active=_time.time(), last_cycle_at=_time.time(),
+        status="active", consecutive_misses=1,  # one prior miss -- must NOT become 2/resolved
+    ))
+    db.commit()
+    db.close()
+
+    unsubscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[tier2_market]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 75.0, "used_gb": 75.0, "total_gb": 100.0}):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: unsubscribed.append(slug),
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert unsubscribed == []
+    assert summary["resolved"] == 0
+
+    db = session_factory()
+    row = db.query(AutoSubscription).filter_by(slug="btc-etf-approval").first()
+    assert row.status == "active"
+    assert row.consecutive_misses == 0  # reset, not incremented -- this is "kept", not "missed"
+    db.close()
+
+
 def test_run_discovery_cycle_sleeps_once_per_new_market():
     session_factory = _sqlite_session_factory()
     markets = []

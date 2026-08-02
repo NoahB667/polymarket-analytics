@@ -299,12 +299,12 @@ def run_discovery_cycle(
     gate = disk_gate_level(disk["used_pct"])
     if gate in ("alert", "critical"):
         alert_callback(
-            f"{'🚨 DISK ALERT' if gate == 'alert' else '🔴 DISK CRITICAL'}: "
+            f"{'DISK ALERT' if gate == 'alert' else 'DISK CRITICAL'}: "
             f"{disk['used_pct']:.1f}% used ({disk['used_gb']:.1f}GB / {disk['total_gb']:.1f}GB)"
         )
     elif gate == "warning":
         alert_callback(
-            f"⚠️ DISK WARNING: {disk['used_pct']:.1f}% used "
+            f"DISK WARNING: {disk['used_pct']:.1f}% used "
             f"({disk['used_gb']:.1f}GB / {disk['total_gb']:.1f}GB)\n"
             f"Auto-discovery paused for new Tier 2 subscriptions."
         )
@@ -323,10 +323,14 @@ def run_discovery_cycle(
         threshold=AUTO_DISCOVERY_THRESHOLD,
         max_total=MAX_AUTO_MARKETS,
     )
-    if gate != "normal":
-        selected = [m for m in selected if m["tier"] == 1]
-    else:
+    if gate == "normal":
         selected = backfill_to_minimum(selected, scored, MIN_ACTIVE_MARKETS, MAX_AUTO_MARKETS)
+    # Note: `selected` keeps ALL qualifying tiers here, even under disk
+    # pressure -- filtering it down to Tier 1 would make already-active
+    # Tier 2 markets look "missing" to diff_discovery_cycle below, which
+    # would increment their consecutive_misses and eventually resolve/
+    # unsubscribe them purely because of transient disk pressure. Disk
+    # gating is applied narrowly below, only to NEW Tier 2+ subscriptions.
 
     selected_by_slug = {m["slug"]: m for m in selected}
 
@@ -343,6 +347,11 @@ def run_discovery_cycle(
         for slug in diff["new_slugs"]:
             try:
                 market = selected_by_slug[slug]
+                if gate != "normal" and market["tier"] != 1:
+                    # Disk pressure gates new Tier 2+ subscriptions only --
+                    # never Tier 1, and never anything already active (that
+                    # path is kept_slugs/missed_slugs, untouched by this gate).
+                    continue
                 token_ids = market.get("token_ids") or []
                 if not token_ids:
                     continue
