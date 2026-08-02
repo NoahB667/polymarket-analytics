@@ -47,3 +47,137 @@ def test_diff_discovery_cycle_second_miss_resolved():
     result = auto_discovery.diff_discovery_cycle(set(), {"a": 1})
     assert result["resolved_slugs"] == {"a"}
     assert result["missed_slugs"] == {}
+
+
+import time as _time
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from db import Base
+from models.orm import AutoSubscription
+
+
+def _sqlite_session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine)
+
+
+_TARIFF_MARKET = {
+    "question": "Will the US impose new tariffs on Chinese semiconductors by Q3 2026?",
+    "category": "economics",
+    "volume24hr": "85000",
+    "endDate": "2099-01-01T00:00:00Z",
+    "bestBid": "0.33",
+    "bestAsk": "0.37",
+    "outcomePrices": '["0.35", "0.65"]',
+    "closed": False,
+    "slug": "us-china-tariffs-q3-2026",
+    "token_ids": ["tok_1", "tok_2"],
+}
+
+
+def test_extract_token_ids_handles_json_string_and_list():
+    assert auto_discovery._extract_token_ids({"clobTokenIds": '["a", "b"]'}) == ["a", "b"]
+    assert auto_discovery._extract_token_ids({"clobTokenIds": ["c", "d"]}) == ["c", "d"]
+    assert auto_discovery._extract_token_ids({}) == []
+
+
+def test_fetch_candidate_markets_dedupes_by_slug():
+    volume_response = [{"slug": "market-a", "markets": [{"clobTokenIds": '["t1"]'}]}]
+    recent_response = [{"slug": "market-a", "markets": [{"clobTokenIds": '["t1"]'}]},
+                        {"slug": "market-b", "markets": [{"clobTokenIds": '["t2"]'}]}]
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return self._payload
+
+    def fake_get(url, params=None, timeout=None):
+        if params["order"] == "volume24Hr":
+            return FakeResponse(volume_response)
+        return FakeResponse(recent_response)
+
+    with patch("core.auto_discovery.requests.get", side_effect=fake_get):
+        candidates = auto_discovery.fetch_candidate_markets()
+
+    slugs = {c["slug"] for c in candidates}
+    assert slugs == {"market-a", "market-b"}
+
+
+def test_run_discovery_cycle_subscribes_new_qualifying_market():
+    session_factory = _sqlite_session_factory()
+    subscribed = []
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[dict(_TARIFF_MARKET)]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append((slug, tids)),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert subscribed == [("us-china-tariffs-q3-2026", ["tok_1", "tok_2"])]
+    assert summary["new"] == 1
+    assert summary["active"] == 1
+
+    db = session_factory()
+    row = db.query(AutoSubscription).filter_by(slug="us-china-tariffs-q3-2026").first()
+    assert row.status == "active"
+    db.close()
+
+
+def test_run_discovery_cycle_marks_resolved_after_two_consecutive_misses():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="old-market", question="Old?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_x"], subscribed_at=_time.time(),
+        last_seen_active=_time.time(), last_cycle_at=_time.time(),
+        status="active", consecutive_misses=1,
+    ))
+    db.commit()
+    db.close()
+
+    unsubscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: unsubscribed.append(slug),
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert unsubscribed == ["old-market"]
+    db = session_factory()
+    row = db.query(AutoSubscription).filter_by(slug="old-market").first()
+    assert row.status == "resolved"
+    db.close()
+
+
+def test_run_discovery_cycle_blocks_new_tier2_but_not_tier1_when_disk_warning():
+    session_factory = _sqlite_session_factory()
+    tier2_market = {
+        "question": "Will a Bitcoin ETF get approved?", "category": "crypto",
+        "volume24hr": "12000", "endDate": "2099-01-01T00:00:00Z",
+        "bestBid": "0.40", "bestAsk": "0.45", "outcomePrices": '["0.42", "0.58"]',
+        "closed": False, "slug": "btc-etf-approval", "token_ids": ["tok_a"],
+    }
+
+    subscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[tier2_market]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 75.0, "used_gb": 75.0, "total_gb": 100.0}):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append(slug),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert subscribed == []
+    assert summary["new"] == 0
