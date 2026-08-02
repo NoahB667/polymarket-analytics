@@ -35,6 +35,11 @@ HIGH_VALUE_CATEGORY_KEYWORDS: List[str] = [
 
 HIGH_VALUE_CATEGORY_BASE_SCORE = 0.4
 
+# -- Default fallback values for malformed inputs ----------------------------
+DEFAULT_PRICE = 0.5
+DEFAULT_SPREAD = 1.0
+SECONDS_PER_DAY = 86400.0
+
 # -- Volume score (higher volume_24h wins the highest bracket it qualifies for) --
 VOLUME_BRACKETS: List[Tuple[float, float]] = [
     (500_000.0, 0.30),
@@ -91,7 +96,7 @@ def normalize_market(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
     now = datetime.now(timezone.utc)
-    days_remaining = (end_date - now).total_seconds() / 86400.0
+    days_remaining = (end_date - now).total_seconds() / SECONDS_PER_DAY
 
     try:
         volume_24h = float(raw.get("volume24hr", 0.0) or 0.0)
@@ -101,11 +106,11 @@ def normalize_market(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     best_bid = raw.get("bestBid")
     best_ask = raw.get("bestAsk")
     try:
-        spread = abs(float(best_ask) - float(best_bid)) if best_bid is not None and best_ask is not None else 1.0
+        spread = abs(float(best_ask) - float(best_bid)) if best_bid is not None and best_ask is not None else DEFAULT_SPREAD
     except (TypeError, ValueError):
-        spread = 1.0
+        spread = DEFAULT_SPREAD
 
-    price = 0.5
+    price = DEFAULT_PRICE
     outcome_prices = raw.get("outcomePrices")
     if outcome_prices:
         try:
@@ -113,7 +118,7 @@ def normalize_market(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 outcome_prices = orjson.loads(outcome_prices)
             price = float(outcome_prices[0])
         except (TypeError, ValueError, IndexError, orjson.JSONDecodeError):
-            price = 0.5
+            price = DEFAULT_PRICE
 
     return {
         "category": raw.get("category") or "",

@@ -79,3 +79,59 @@ def test_score_market_worked_example_bitcoin_caps_at_one():
     ))
     market["days_remaining"] = 180.0
     assert score_market(market) == 1.0
+
+
+# -- Error-case tests: malformed inputs gracefully fall back ----------------
+
+
+def test_normalize_market_with_unparsable_enddate_returns_none():
+    raw = _raw_market(endDate="not-a-date")
+    assert normalize_market(raw) is None
+
+
+def test_normalize_market_with_non_numeric_volume24hr_falls_back_to_zero():
+    raw = _raw_market(volume24hr="not-a-number")
+    normalized = normalize_market(raw)
+    assert normalized is not None
+    assert normalized["volume_24h"] == 0.0
+
+
+def test_normalize_market_with_non_numeric_bestbid_falls_back_to_default_spread():
+    raw = _raw_market(bestBid="not-a-number", bestAsk="0.37")
+    normalized = normalize_market(raw)
+    assert normalized is not None
+    from analytics.market_scorer import DEFAULT_SPREAD
+    assert _approx(normalized["spread"], DEFAULT_SPREAD)
+
+
+def test_normalize_market_with_non_numeric_bestask_falls_back_to_default_spread():
+    raw = _raw_market(bestBid="0.33", bestAsk="not-a-number")
+    normalized = normalize_market(raw)
+    assert normalized is not None
+    from analytics.market_scorer import DEFAULT_SPREAD
+    assert _approx(normalized["spread"], DEFAULT_SPREAD)
+
+
+def test_normalize_market_with_missing_bestbid_falls_back_to_default_spread():
+    raw = _raw_market()
+    del raw["bestBid"]
+    normalized = normalize_market(raw)
+    assert normalized is not None
+    from analytics.market_scorer import DEFAULT_SPREAD
+    assert _approx(normalized["spread"], DEFAULT_SPREAD)
+
+
+def test_normalize_market_with_unparsable_outcomePrices_falls_back_to_default_price():
+    raw = _raw_market(outcomePrices="not-json")
+    normalized = normalize_market(raw)
+    assert normalized is not None
+    from analytics.market_scorer import DEFAULT_PRICE
+    assert _approx(normalized["price"], DEFAULT_PRICE)
+
+
+def test_normalize_market_with_outcomePrices_empty_list_falls_back_to_default_price():
+    raw = _raw_market(outcomePrices="[]")
+    normalized = normalize_market(raw)
+    assert normalized is not None
+    from analytics.market_scorer import DEFAULT_PRICE
+    assert _approx(normalized["price"], DEFAULT_PRICE)
