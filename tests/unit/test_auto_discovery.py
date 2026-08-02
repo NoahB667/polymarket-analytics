@@ -181,3 +181,48 @@ def test_run_discovery_cycle_blocks_new_tier2_but_not_tier1_when_disk_warning():
 
     assert subscribed == []
     assert summary["new"] == 0
+
+
+def test_run_discovery_cycle_tier1_unblocked_and_tier2_blocked_same_cycle_disk_warning():
+    session_factory = _sqlite_session_factory()
+    tier1_market = dict(_TARIFF_MARKET)  # score > 0.8 (high volume, long time horizon)
+    tier2_market = {
+        "question": "Will a Bitcoin ETF get approved?", "category": "crypto",
+        "volume24hr": "12000", "endDate": "2099-01-01T00:00:00Z",
+        "bestBid": "0.40", "bestAsk": "0.45", "outcomePrices": '["0.42", "0.58"]',
+        "closed": False, "slug": "btc-etf-approval", "token_ids": ["tok_a"],
+    }
+
+    subscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[tier1_market, tier2_market]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 75.0, "used_gb": 75.0, "total_gb": 100.0}):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append(slug),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert subscribed == ["us-china-tariffs-q3-2026"]
+    assert summary["new"] == 1
+
+
+def test_run_discovery_cycle_sleeps_once_per_new_market():
+    session_factory = _sqlite_session_factory()
+    markets = []
+    for i in range(3):
+        m = dict(_TARIFF_MARKET)
+        m["slug"] = f"market-{i}"
+        markets.append(m)
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=markets), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}), \
+         patch("core.auto_discovery.time.sleep") as mock_sleep:
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert mock_sleep.call_count == 3

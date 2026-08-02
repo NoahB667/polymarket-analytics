@@ -32,6 +32,7 @@ AUTO_DISCOVERY_INTERVAL_HOURS = float(os.getenv("AUTO_DISCOVERY_INTERVAL_HOURS",
 AUTO_DISCOVERY_THRESHOLD = float(os.getenv("AUTO_DISCOVERY_THRESHOLD", "0.5"))
 MAX_AUTO_MARKETS = int(os.getenv("MAX_AUTO_MARKETS", "500"))
 API_DELAY_SECONDS = float(os.getenv("AUTO_DISCOVERY_API_DELAY_SECONDS", "0.1"))
+NEW_MARKET_ALERT_THRESHOLD = 10
 
 DISK_WARNING_PCT = float(os.getenv("DISK_WARNING_PCT", "70"))
 DISK_ALERT_PCT = float(os.getenv("DISK_ALERT_PCT", "80"))
@@ -221,52 +222,75 @@ def run_discovery_cycle(
         diff = diff_discovery_cycle(set(selected_by_slug.keys()), active_misses)
         now = time.time()
 
+        applied_new = set()
         for slug in diff["new_slugs"]:
-            market = selected_by_slug[slug]
-            token_ids = market.get("token_ids") or []
-            if not token_ids:
+            try:
+                market = selected_by_slug[slug]
+                token_ids = market.get("token_ids") or []
+                if not token_ids:
+                    continue
+                db.add(AutoSubscription(
+                    slug=slug,
+                    question=market.get("question"),
+                    category=market.get("category"),
+                    market_score=market["score"],
+                    tier=market["tier"],
+                    volume_24h=market.get("volume_24h"),
+                    days_remaining=market.get("days_remaining"),
+                    token_ids=token_ids,
+                    subscribed_at=now,
+                    last_seen_active=now,
+                    last_cycle_at=now,
+                    status="active",
+                    consecutive_misses=0,
+                ))
+                if redis_client is not None:
+                    try:
+                        redis_client.setex(f"meta:question:{slug}", 86400, market.get("question", "N/A"))
+                    except Exception as e:
+                        logger.error(f"Auto-discovery: failed to pre-warm metadata for {slug}: {e}")
+                subscribe_callback(slug, token_ids)
+                time.sleep(API_DELAY_SECONDS)
+                applied_new.add(slug)
+            except Exception as e:
+                logger.error(f"Auto-discovery: failed to process new market {slug}: {e}")
                 continue
-            db.add(AutoSubscription(
-                slug=slug,
-                question=market.get("question"),
-                category=market.get("category"),
-                market_score=market["score"],
-                tier=market["tier"],
-                volume_24h=market.get("volume_24h"),
-                days_remaining=market.get("days_remaining"),
-                token_ids=token_ids,
-                subscribed_at=now,
-                last_seen_active=now,
-                last_cycle_at=now,
-                status="active",
-                consecutive_misses=0,
-            ))
-            if redis_client is not None:
-                try:
-                    redis_client.setex(f"meta:question:{slug}", 86400, market.get("question", "N/A"))
-                except Exception as e:
-                    logger.error(f"Auto-discovery: failed to pre-warm metadata for {slug}: {e}")
-            subscribe_callback(slug, token_ids)
-            time.sleep(API_DELAY_SECONDS)
 
         for slug in diff["kept_slugs"]:
-            row = rows_by_slug[slug]
-            row.consecutive_misses = 0
-            row.last_seen_active = now
-            row.last_cycle_at = now
+            try:
+                row = rows_by_slug[slug]
+                row.consecutive_misses = 0
+                row.last_seen_active = now
+                row.last_cycle_at = now
+            except Exception as e:
+                logger.error(f"Auto-discovery: failed to update kept market {slug}: {e}")
+                continue
 
         for slug, misses in diff["missed_slugs"].items():
-            row = rows_by_slug[slug]
-            row.consecutive_misses = misses
-            row.last_cycle_at = now
+            try:
+                row = rows_by_slug[slug]
+                row.consecutive_misses = misses
+                row.last_cycle_at = now
+            except Exception as e:
+                logger.error(f"Auto-discovery: failed to update missed market {slug}: {e}")
+                continue
 
         for slug in diff["resolved_slugs"]:
-            row = rows_by_slug[slug]
-            row.status = "resolved"
-            row.last_cycle_at = now
-            unsubscribe_callback(slug)
+            try:
+                row = rows_by_slug[slug]
+                row.status = "resolved"
+                row.last_cycle_at = now
+                unsubscribe_callback(slug)
+            except Exception as e:
+                logger.error(f"Auto-discovery: failed to resolve market {slug}: {e}")
+                continue
 
-        db.commit()
+        try:
+            db.commit()
+        except Exception as e:
+            logger.error(f"Auto-discovery: failed to commit discovery cycle: {e}")
+            db.rollback()
+            applied_new = set()
 
         tier1_count = db.query(AutoSubscription).filter_by(status="active", tier=1).count()
         tier2_count = db.query(AutoSubscription).filter_by(status="active", tier=2).count()
@@ -275,7 +299,7 @@ def run_discovery_cycle(
 
     active_count = tier1_count + tier2_count
     summary = {
-        "new": len(diff["new_slugs"]),
+        "new": len(applied_new),
         "resolved": len(diff["resolved_slugs"]),
         "active": active_count,
         "tier1": tier1_count,
@@ -299,7 +323,7 @@ def run_discovery_cycle(
         except Exception as e:
             logger.error(f"Auto-discovery: failed to publish Redis counters: {e}")
 
-    if summary["new"] > 10:
+    if summary["new"] > NEW_MARKET_ALERT_THRESHOLD:
         alert_callback(
             f"🔍 Auto-discovery: +{summary['new']} new markets "
             f"(Tier 1: {tier1_count}, Tier 2: {tier2_count}, Total: {active_count})"
