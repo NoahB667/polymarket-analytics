@@ -8,8 +8,7 @@ websocket_order_book.py -- user /track subscriptions keep using that path.
 import json
 import logging
 import threading
-import time
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from websocket import WebSocketApp
 
@@ -24,7 +23,7 @@ RECONNECT_DELAY_SECONDS = 5
 class GlobalWebSocketManager:
     """Routes trades from one shared WebSocket connection to per-slug callbacks."""
 
-    def __init__(self, url: str, redis_client=None) -> None:
+    def __init__(self, url: str, redis_client: Optional[Any] = None) -> None:
         self.url = url
         self.redis_client = redis_client
         self._lock = threading.RLock()

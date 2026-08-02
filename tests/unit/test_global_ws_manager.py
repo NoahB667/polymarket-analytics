@@ -1,6 +1,5 @@
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
@@ -18,7 +17,7 @@ def test_add_market_registers_asset_ids_and_callback():
     assert set(manager.current_asset_ids()) == {"tok_1", "tok_2"}
     with manager._lock:
         assert manager._routing_table["tok_1"] == "fed-rate-june"
-        assert manager._callbacks["fed-rate-june"] is received.append
+        assert manager._callbacks["fed-rate-june"] == received.append
 
 
 def test_remove_market_clears_routing_table_and_callback():
