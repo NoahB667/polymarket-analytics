@@ -229,6 +229,11 @@ def run_discovery_cycle(
                 token_ids = market.get("token_ids") or []
                 if not token_ids:
                     continue
+                # Call the real-world side effect FIRST -- only persist the
+                # AutoSubscription row if subscribe_callback actually
+                # succeeded, so DB state never claims a market is "active"
+                # when GlobalWebSocketManager never picked it up.
+                subscribe_callback(slug, token_ids)
                 db.add(AutoSubscription(
                     slug=slug,
                     question=market.get("question"),
@@ -249,7 +254,6 @@ def run_discovery_cycle(
                         redis_client.setex(f"meta:question:{slug}", 86400, market.get("question", "N/A"))
                     except Exception as e:
                         logger.error(f"Auto-discovery: failed to pre-warm metadata for {slug}: {e}")
-                subscribe_callback(slug, token_ids)
                 time.sleep(API_DELAY_SECONDS)
                 applied_new.add(slug)
             except Exception as e:
@@ -278,9 +282,14 @@ def run_discovery_cycle(
         for slug in diff["resolved_slugs"]:
             try:
                 row = rows_by_slug[slug]
+                # Call the real-world side effect FIRST -- only mark the row
+                # resolved if unsubscribe_callback actually succeeded, so a
+                # still-live market never gets left permanently mislabeled
+                # "resolved" in the DB while GlobalWebSocketManager still
+                # has it subscribed.
+                unsubscribe_callback(slug)
                 row.status = "resolved"
                 row.last_cycle_at = now
-                unsubscribe_callback(slug)
             except Exception as e:
                 logger.error(f"Auto-discovery: failed to resolve market {slug}: {e}")
                 continue

@@ -226,3 +226,66 @@ def test_run_discovery_cycle_sleeps_once_per_new_market():
         )
 
     assert mock_sleep.call_count == 3
+
+
+def test_run_discovery_cycle_no_db_row_when_subscribe_callback_raises():
+    session_factory = _sqlite_session_factory()
+    good_market = dict(_TARIFF_MARKET)
+    bad_market = dict(_TARIFF_MARKET)
+    bad_market["slug"] = "bad-market"
+
+    def flaky_subscribe(slug, tids):
+        if slug == "bad-market":
+            raise RuntimeError("GlobalWebSocketManager wiring failed")
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[good_market, bad_market]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        summary = auto_discovery.run_discovery_cycle(
+            subscribe_callback=flaky_subscribe,
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert summary["new"] == 1
+
+    db = session_factory()
+    good_row = db.query(AutoSubscription).filter_by(slug="us-china-tariffs-q3-2026").first()
+    bad_row = db.query(AutoSubscription).filter_by(slug="bad-market").first()
+    db.close()
+
+    assert good_row is not None
+    assert good_row.status == "active"
+    assert bad_row is None
+
+
+def test_run_discovery_cycle_stays_active_when_unsubscribe_callback_raises():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="flaky-unsub-market", question="Old?", category="economics",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_x"], subscribed_at=_time.time(),
+        last_seen_active=_time.time(), last_cycle_at=_time.time(),
+        status="active", consecutive_misses=1,
+    ))
+    db.commit()
+    db.close()
+
+    def flaky_unsubscribe(slug):
+        raise RuntimeError("unsubscribe failed")
+
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: None,
+            unsubscribe_callback=flaky_unsubscribe,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    db = session_factory()
+    row = db.query(AutoSubscription).filter_by(slug="flaky-unsub-market").first()
+    db.close()
+
+    assert row.status == "active"
