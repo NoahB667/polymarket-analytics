@@ -55,13 +55,16 @@ def test_build_wallet_intelligence_query_returns_none_for_empty_list():
 
 
 def test_build_wallet_intelligence_query_includes_all_condition_ids():
-    sql = wis.build_wallet_intelligence_query(["0xabc123", "0xdef456"], lookback_days=2, min_usd=100, row_limit=5000)
+    sql = wis.build_wallet_intelligence_query(["0xABC123", "0xdef456"], lookback_days=2, min_usd=100, row_limit=5000)
+    # Lowercased regardless of input casing -- Dune's to_hex(varbinary)
+    # returns uppercase hex, so the comparison must be case-insensitive.
     assert "'0xabc123'" in sql
     assert "'0xdef456'" in sql
+    assert "lower(to_hex(t.condition_id))" in sql
     assert "t.amount >= 100" in sql
     assert "LIMIT 5000" in sql
     assert "t.is_taker_side = TRUE" in sql
-    assert "t.action = 'clob'" in sql
+    assert "t.action = 'CLOB trade'" in sql
 
 
 def test_run_wallet_intelligence_cycle_skips_when_no_condition_ids():
@@ -171,8 +174,14 @@ def test_run_wallet_intelligence_cycle_survives_dune_failure():
     assert summary["ingested"] == 0
 
 
-def test_run_wallet_intelligence_loop_disabled_by_default_does_nothing():
-    with patch.object(wis, "run_wallet_intelligence_cycle") as mock_cycle:
+def test_run_wallet_intelligence_loop_disabled_does_nothing():
+    """Explicitly forces the disabled state rather than relying on the
+    ambient WALLET_INTELLIGENCE_ENABLED default -- a real .env can (and, on
+    this dev box, does) set it to true, which would otherwise make this
+    test silently fire a real Dune query and block for a real 6-24h wait.
+    """
+    with patch.object(wis, "WALLET_INTELLIGENCE_ENABLED", False), \
+         patch.object(wis, "run_wallet_intelligence_cycle") as mock_cycle:
         wis.run_wallet_intelligence_loop()
 
     mock_cycle.assert_not_called()

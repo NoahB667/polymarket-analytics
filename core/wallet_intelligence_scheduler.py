@@ -36,6 +36,12 @@ WALLET_INTELLIGENCE_INTERVAL_HOURS = float(os.getenv("WALLET_INTELLIGENCE_INTERV
 WALLET_INTELLIGENCE_LOOKBACK_DAYS = int(os.getenv("WALLET_INTELLIGENCE_LOOKBACK_DAYS", "2"))
 WALLET_INTELLIGENCE_MIN_USD = float(os.getenv("WALLET_INTELLIGENCE_MIN_USD", "100"))
 WALLET_INTELLIGENCE_ROW_LIMIT = int(os.getenv("WALLET_INTELLIGENCE_ROW_LIMIT", "10000"))
+# Verified live against Dune: polymarket_polygon.market_trades.action currently
+# holds 'CLOB trade' (3.19M rows/day), not the lowercase 'clob' that both this
+# query and the pre-existing scripts/backfill_polygon.py assumed -- that
+# stale filter was silently zeroing out every result (schema drift in Dune's
+# spellbook table since backfill_polygon.py was last written/run).
+CLOB_ACTION_VALUE = "CLOB trade"
 
 CONDITION_ID_PATTERN = re.compile(r"^0x[0-9a-fA-F]+$")
 
@@ -100,7 +106,12 @@ def build_wallet_intelligence_query(
     if not sanitized:
         return None
 
-    id_list = ", ".join(f"'{cid}'" for cid in sanitized)
+    # Verified live against Dune: to_hex(varbinary) returns UPPERCASE hex,
+    # while Gamma's conditionId (what we store) is lowercase -- a naive
+    # comparison silently matches zero rows. Lowercasing both sides here
+    # makes the comparison case-insensitive regardless of which casing
+    # either side happens to use.
+    id_list = ", ".join(f"'{cid.lower()}'" for cid in sanitized)
     since_date = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
 
     return (
@@ -117,10 +128,10 @@ def build_wallet_intelligence_query(
         "FROM polymarket_polygon.market_trades t\n"
         f"WHERE t.block_time >= CAST('{since_date}' AS TIMESTAMP)\n"
         "  AND t.is_taker_side = TRUE\n"
-        "  AND t.action = 'clob'\n"
+        f"  AND t.action = '{CLOB_ACTION_VALUE}'\n"
         "  AND t.maker IS NOT NULL\n"
         f"  AND t.amount >= {min_usd}\n"
-        f"  AND ('0x' || to_hex(t.condition_id)) IN ({id_list})\n"
+        f"  AND ('0x' || lower(to_hex(t.condition_id))) IN ({id_list})\n"
         "ORDER BY t.block_time ASC\n"
         f"LIMIT {row_limit}"
     )
