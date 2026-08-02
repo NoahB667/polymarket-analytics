@@ -12,7 +12,6 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from websocket import WebSocketApp
-from websocket_order_book import get_market_metadata
 
 logger = logging.getLogger("polymarket.core.global_ws_manager")
 
@@ -75,6 +74,32 @@ class GlobalWebSocketManager:
         except Exception as e:
             logger.error(f"GlobalWebSocketManager failed to send subscription update: {e}")
 
+    def _lookup_cached_metadata(self, market: str) -> Dict[str, object]:
+        """Reads market question/outcomes from Redis only -- never blocks on HTTP.
+
+        Auto-tracked markets are pre-warmed into Redis at subscribe time (a
+        later task), so a cache miss here should be rare. Unlike
+        websocket_order_book.get_market_metadata, this never falls back to a
+        live CLOB request -- this method runs on the single shared WebSocket
+        thread serving every auto-tracked market, so blocking here would stall
+        trade processing for all of them.
+        """
+        question_key = f"meta:question:{market}"
+        outcomes_hash_key = f"meta:outcomes:{market}"
+
+        if self.redis_client is not None:
+            try:
+                pipe = self.redis_client.pipeline()
+                pipe.get(question_key)
+                pipe.hgetall(outcomes_hash_key)
+                cached_question, cached_outcomes = pipe.execute()
+                if cached_question and cached_outcomes:
+                    return {"question": cached_question, "outcomes": cached_outcomes}
+            except Exception as e:
+                logger.error(f"GlobalWebSocketManager metadata cache lookup failed for {market}: {e}")
+
+        return {"question": "N/A", "outcomes": {}}
+
     def _route_message(self, message: dict) -> None:
         asset_id = str(message.get("asset_id", ""))
         with self._lock:
@@ -84,7 +109,7 @@ class GlobalWebSocketManager:
             return
 
         market_id = message.get("market")
-        metadata = get_market_metadata(market_id, self.redis_client)
+        metadata = self._lookup_cached_metadata(market_id)
         question = metadata.get("question", "N/A")
         outcome = metadata.get("outcomes", {}).get(asset_id, "N/A")
         price = float(message.get("price", 0.0) or 0.0)

@@ -40,18 +40,22 @@ def test_on_message_routes_trade_to_correct_callback_with_metadata():
     received = []
     manager.add_market("fed-rate-june", ["tok_1"], received.append)
 
-    with patch(
-        "core.global_ws_manager.get_market_metadata",
-        return_value={"question": "Will the Fed cut rates?", "outcomes": {"tok_1": "Yes"}},
-    ):
-        raw = json.dumps({
-            "market": "0xmarket123",
-            "asset_id": "tok_1",
-            "price": "0.42",
-            "size": "100.0",
-            "side": "BUY",
-        })
-        manager.on_message(None, raw)
+    # Mock Redis with pipeline support
+    fake_redis = MagicMock()
+    fake_redis.pipeline.return_value.execute.return_value = (
+        "Will the Fed cut rates?",
+        {"tok_1": "Yes"}
+    )
+    manager.redis_client = fake_redis
+
+    raw = json.dumps({
+        "market": "0xmarket123",
+        "asset_id": "tok_1",
+        "price": "0.42",
+        "size": "100.0",
+        "side": "BUY",
+    })
+    manager.on_message(None, raw)
 
     assert len(received) == 1
     details = received[0]
@@ -101,3 +105,27 @@ def test_close_stops_running_and_closes_socket():
 
     assert manager._running is False
     fake_ws.close.assert_called_once()
+
+
+def test_lookup_cached_metadata_returns_na_on_cache_miss():
+    """Verify cache miss returns N/A placeholders and doesn't block or raise."""
+    manager = GlobalWebSocketManager(url="wss://example.test")
+    # No Redis client
+    manager.redis_client = None
+
+    result = manager._lookup_cached_metadata("0xmarket123")
+
+    assert result == {"question": "N/A", "outcomes": {}}
+
+
+def test_lookup_cached_metadata_returns_na_on_redis_failure():
+    """Verify Redis exception returns N/A placeholders and doesn't crash."""
+    manager = GlobalWebSocketManager(url="wss://example.test")
+    # Mock Redis that raises
+    fake_redis = MagicMock()
+    fake_redis.pipeline.side_effect = Exception("Redis connection failed")
+    manager.redis_client = fake_redis
+
+    result = manager._lookup_cached_metadata("0xmarket123")
+
+    assert result == {"question": "N/A", "outcomes": {}}
