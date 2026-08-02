@@ -23,7 +23,7 @@ from models.orm import AutoSubscription
 logger = logging.getLogger("polymarket.core.auto_discovery")
 
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
-TOP_VOLUME_PARAMS = {"active": "true", "order": "volume24Hr", "ascending": "false", "limit": 100}
+TOP_VOLUME_PARAMS = {"active": "true", "order": "volume24hr", "ascending": "false", "limit": 100}
 RECENT_PARAMS = {"active": "true", "order": "startDate", "ascending": "false", "limit": 50}
 RESOLVED_MISS_THRESHOLD = 2
 

@@ -49,6 +49,7 @@ def test_on_message_routes_trade_to_correct_callback_with_metadata():
     manager.redis_client = fake_redis
 
     raw = json.dumps({
+        "event_type": "last_trade_price",
         "market": "0xmarket123",
         "asset_id": "tok_1",
         "price": "0.42",
@@ -73,7 +74,13 @@ def test_on_message_ignores_unknown_asset_id():
     received = []
     manager.add_market("fed-rate-june", ["tok_1"], received.append)
 
-    raw = json.dumps({"market": "0xmarket123", "asset_id": "tok_unknown", "price": "0.5", "size": "1"})
+    raw = json.dumps({
+        "event_type": "last_trade_price",
+        "market": "0xmarket123",
+        "asset_id": "tok_unknown",
+        "price": "0.5",
+        "size": "1",
+    })
     manager.on_message(None, raw)
 
     assert received == []
@@ -129,3 +136,40 @@ def test_lookup_cached_metadata_returns_na_on_redis_failure():
     result = manager._lookup_cached_metadata("0xmarket123")
 
     assert result == {"question": "N/A", "outcomes": {}}
+
+
+def test_on_message_ignores_non_trade_event_types():
+    """Verify book/price_change/etc. events sharing this feed aren't routed as trades.
+
+    Confirmed against the live Polymarket market WebSocket feed: it sends
+    multiple event types on the same connection, all carrying asset_id, but
+    only "last_trade_price" events carry real price/size/side data.
+    """
+    manager = GlobalWebSocketManager(url="wss://example.test")
+    received = []
+    manager.add_market("fed-rate-june", ["tok_1"], received.append)
+
+    raw = json.dumps({
+        "event_type": "book",
+        "market": "0xmarket123",
+        "asset_id": "tok_1",
+    })
+    manager.on_message(None, raw)
+
+    assert received == []
+
+
+def test_on_message_ignores_non_json_keepalive_text():
+    """Verify a literal non-JSON keepalive message (e.g. "PONG") is skipped silently.
+
+    Confirmed against the live Polymarket market WebSocket feed: it sends
+    plain-text keepalive frames alongside JSON trade messages, and treating
+    them as application errors would spam error-level logs for benign traffic.
+    """
+    manager = GlobalWebSocketManager(url="wss://example.test")
+    received = []
+    manager.add_market("fed-rate-june", ["tok_1"], received.append)
+
+    manager.on_message(None, "PONG")
+
+    assert received == []

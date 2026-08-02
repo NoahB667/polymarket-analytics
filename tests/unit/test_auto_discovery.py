@@ -96,7 +96,7 @@ def test_fetch_candidate_markets_dedupes_by_slug():
             return self._payload
 
     def fake_get(url, params=None, timeout=None):
-        if params["order"] == "volume24Hr":
+        if params["order"] == "volume24hr":
             return FakeResponse(volume_response)
         return FakeResponse(recent_response)
 

@@ -16,6 +16,7 @@ from websocket import WebSocketApp
 logger = logging.getLogger("polymarket.core.global_ws_manager")
 
 MARKET_CHANNEL = "market"
+TRADE_EVENT_TYPE = "last_trade_price"
 PING_INTERVAL_SECONDS = 20
 PING_TIMEOUT_SECONDS = 10
 RECONNECT_DELAY_SECONDS = 5
@@ -101,6 +102,13 @@ class GlobalWebSocketManager:
         return {"question": "N/A", "outcomes": {}}
 
     def _route_message(self, message: dict) -> None:
+        if message.get("event_type") != TRADE_EVENT_TYPE:
+            # Book updates, price changes, tick-size changes, etc. share this
+            # feed and carry the same asset_id shape but no real price/size/
+            # side -- routing them as trades would corrupt the trade table
+            # and skew Signal 1's OFI calculation with fake zero-price fills.
+            return
+
         asset_id = str(message.get("asset_id", ""))
         with self._lock:
             slug = self._routing_table.get(asset_id)
@@ -136,7 +144,12 @@ class GlobalWebSocketManager:
             stripped = raw.lstrip()
             if not stripped:
                 return
-            data = json.loads(raw)
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                # Non-JSON keepalive text (e.g. a literal "PONG") is expected,
+                # benign traffic on this feed -- not an application error.
+                return
             messages = data if isinstance(data, list) else [data]
             for msg in messages:
                 if isinstance(msg, dict):
