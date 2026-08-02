@@ -17,6 +17,7 @@ from db import engine, SessionLocal, get_db_session, logger
 from models.orm import Base, PriceImpactCheck, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
+from core.global_ws_manager import GlobalWebSocketManager
 
 
 load_dotenv()
@@ -166,16 +167,17 @@ def get_token_ids(slug: str):
     except Exception as e:
         return None, str(e)
 
-def ensure_market_stream(slug: str) -> tuple[bool, str]:
-    """Spawns an isolated C++ memory pipeline connection for incoming tokens."""
-    if slug in market_streams:
-        return True, "Stream already active"
+def build_trade_callback(slug: str):
+    """Builds the hot-path trade callback for a given market slug.
 
-    assets_ids, error = get_token_ids(slug)
-    if error:
-        return False, error
-
-    # Streamlined unified dispatcher callback
+    Used by both the legacy per-market WebSocketOrderBook flow (user
+    /track subscriptions) and the GlobalWebSocketManager flow (auto-
+    discovered markets). Behavior is identical for both: Signal 1
+    updates, Redis caching, price-impact queueing, DB persistence, and
+    Telegram alerts gated on Redis subscribers -- which are always empty
+    for auto-tracked markets, so alerts are a no-op there with zero extra
+    logic needed.
+    """
     def on_trade_dispatched(details: dict):
         """
         Hot path pass-through.
@@ -265,8 +267,22 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
             except Exception as ex:
                 logger.error(f"Error checking redis alerts: {ex}")
 
+    return on_trade_dispatched
+
+
+def ensure_market_stream(slug: str) -> tuple[bool, str]:
+    """Spawns an isolated C++ memory pipeline connection for incoming tokens."""
+    if slug in market_streams:
+        return True, "Stream already active"
+
+    assets_ids, error = get_token_ids(slug)
+    if error:
+        return False, error
+
+    on_trade_dispatched = build_trade_callback(slug)
+
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-    
+
     market_connection = WebSocketOrderBook(
         channel_type="market",
         url=url,
@@ -287,10 +303,21 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
 
     t = threading.Thread(target=_run_lifecycle, daemon=True)
     t.start()
-    
+
     # Sync initial subscribers into C++ structures immediately
     market_connection.sync_subscriptions()
     return True, "Started"
+
+
+global_ws_manager = GlobalWebSocketManager(
+    url="wss://ws-subscriptions-clob.polymarket.com/ws/market",
+    redis_client=r,
+)
+
+
+def ensure_auto_market_stream(slug: str, token_ids: list) -> None:
+    """Registers an auto-discovered market on the shared WebSocket connection."""
+    global_ws_manager.add_market(slug, token_ids, build_trade_callback(slug))
 
 
 @asynccontextmanager
