@@ -3,9 +3,14 @@
 import logging
 from typing import Any, Dict, Optional
 
-from signal_core.trade_filter import LONG_SHOT_PRICE_THRESHOLD, LARGE_TRADE_USD_THRESHOLD
-
 logger = logging.getLogger("polymarket.core.cpp_bridge")
+
+try:
+    from signal_core.trade_filter import LONG_SHOT_PRICE_THRESHOLD, LARGE_TRADE_USD_THRESHOLD
+except ImportError as e:
+    logger.critical("Fatal: signal_core package not found or failed to load. "
+                    "Run: git submodule update --init && pip install -e vendor/signal-core")
+    raise ImportError("signal_core package missing. Aborting startup.") from e
 
 try:
     import polymarket_core as _cpp
