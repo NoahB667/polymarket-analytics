@@ -3,6 +3,8 @@
 import logging
 from typing import Any, Dict, Optional
 
+from signal_core.trade_filter import LONG_SHOT_PRICE_THRESHOLD, LARGE_TRADE_USD_THRESHOLD
+
 logger = logging.getLogger("polymarket.core.cpp_bridge")
 
 try:
@@ -24,7 +26,12 @@ class CoreEngineBridge:
         self._queue_capacity = queue_capacity
         
         try:
-            self._engine = _cpp.CoreEngine(pool_capacity, queue_capacity)
+            self._engine = _cpp.CoreEngine(
+                pool_capacity,
+                queue_capacity,
+                LONG_SHOT_PRICE_THRESHOLD,
+                LARGE_TRADE_USD_THRESHOLD,
+            )
         except Exception as e:
             logger.critical(f"Failed to instantiate C++ CoreEngine within runtime context: {e}")
             raise
