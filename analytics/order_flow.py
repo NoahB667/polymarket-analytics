@@ -7,7 +7,12 @@ import requests
 
 from db import get_db_session
 from models.orm import PriceImpactCheck
-from signal_core.order_flow import generate_signal_score as _score_order_flow
+try:
+    from signal_core.order_flow import generate_signal_score as _score_order_flow
+except ImportError as e:
+    raise ImportError(
+        "signal_core package missing. Run: git submodule update --init && pip install -e vendor/signal-core"
+    ) from e
 
 market_windows = {}
 lock = threading.Lock()
