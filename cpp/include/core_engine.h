@@ -12,7 +12,12 @@ namespace polymarket {
 
 class CoreEngine {
 public:
-    CoreEngine(std::size_t pool_capacity, std::size_t queue_capacity);
+    CoreEngine(
+        std::size_t pool_capacity,
+        std::size_t queue_capacity,
+        double long_shot_price_threshold,
+        double large_trade_usd_threshold
+    );
     ~CoreEngine() = default;
     bool process_json(std::string_view json);
     bool pop_priority(RawTrade& out_trade) noexcept;
@@ -30,6 +35,8 @@ private:
     TradeQueue normal_queue_;
     TradeFilter filter_;
     MetricsRecorder metrics_;
+    double long_shot_price_threshold_;
+    double large_trade_usd_threshold_;
 };
 
 }

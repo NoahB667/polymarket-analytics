@@ -2,6 +2,12 @@
 #include <cassert>
 
 int main() {
+    // Arbitrary test-fixture thresholds -- deliberately not the real calibrated
+    // values, which live only in signal_core/trade_filter.py. This test verifies
+    // score_trade's routing LOGIC, not the real threshold numbers.
+    constexpr double kLongShotPriceThreshold = 0.15;
+    constexpr double kLargeTradeUsdThreshold = 5000.0;
+
     polymarket::RawTrade trade1{};
     trade1.market_id = 1;
     trade1.price = 0.10;
@@ -12,8 +18,8 @@ int main() {
     trade2.price = 0.70;
     trade2.usd = 1000;
 
-    auto score1 = polymarket::score_trade(trade1);
-    auto score2 = polymarket::score_trade(trade2);
+    auto score1 = polymarket::score_trade(trade1, kLongShotPriceThreshold, kLargeTradeUsdThreshold);
+    auto score2 = polymarket::score_trade(trade2, kLongShotPriceThreshold, kLargeTradeUsdThreshold);
 
     assert(score1.score == 2);
     assert(score1.is_large_trade == true);
@@ -22,6 +28,6 @@ int main() {
     assert(score2.score == 0);
     assert(score2.is_large_trade == false);
     assert(score2.is_long_shot == false);
-    
+
     return 0;
 }
