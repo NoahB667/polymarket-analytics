@@ -7,6 +7,12 @@ import requests
 
 from db import get_db_session
 from models.orm import PriceImpactCheck
+try:
+    from signal_core.order_flow import generate_signal_score as _score_order_flow
+except ImportError as e:
+    raise ImportError(
+        "signal_core package missing. Run: git submodule update --init && pip install -e vendor/signal-core"
+    ) from e
 
 market_windows = {}
 lock = threading.Lock()
@@ -62,50 +68,17 @@ def calculate_volume_spike(slug: str, redis_client) -> float:
     return 1.0
 
 def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
-    # 1. Extract our directional indicators across all horizons
-    ofi_1m  = calculate_ofi(slug, window_minutes=1)
-    ofi_5m  = calculate_ofi(slug, window_minutes=5)
+    ofi_1m = calculate_ofi(slug, window_minutes=1)
+    ofi_5m = calculate_ofi(slug, window_minutes=5)
     ofi_15m = calculate_ofi(slug, window_minutes=15)
-    ofi_1h  = calculate_ofi(slug, window_minutes=60)
-    
-    # 2. Extract our market-relative volume metric
+    ofi_1h = calculate_ofi(slug, window_minutes=60)
+
     volume_spike = calculate_volume_spike(slug, redis_client)
-    
-    # 3. Apply a weighted aggregation equation to compute the base score
-    # Weights: 1m (40%), 5m (30%), 15m (20%), 1h (10%)
-    base_ofi_score = (ofi_1m * 0.40) + (ofi_5m * 0.30) + (ofi_15m * 0.20) + (ofi_1h * 0.10)
-    
-    # 4. Check our Long-Shot asymmetric upside condition (Odds < 20%)
-    is_long_shot = (latest_price < 0.20)
-    
-    # If it's a long shot and volume is surging, we amplify the signal weight!
-    if is_long_shot and volume_spike > 1.5:
-        confidence_multiplier = 1.5
-    else:
-        confidence_multiplier = 1.0
-        
-    # Compute the final bounded score
-    final_score = base_ofi_score * confidence_multiplier
-    final_score = max(-1.0, min(1.0, final_score))  # Force boundary cap between -1 and 1
-    
-    # 5. Determine trade directionality based on net order pressure
-    direction = "BUY" if final_score >= 0 else "SELL"
-    
-    # Pack everything up into a clean data frame schema
-    return {
-        "slug": slug,
-        "score": round(final_score, 4),
-        "direction": direction,
-        "volume_spike_ratio": round(volume_spike, 2),
-        "long_shot_triggered": is_long_shot,
-        "metrics": {
-            "ofi_1m": round(ofi_1m, 2),
-            "ofi_5m": round(ofi_5m, 2),
-            "ofi_15m": round(ofi_15m, 2),
-            "ofi_1h": round(ofi_1h, 2)
-        },
-        "updated_at": time.time()
-    }
+
+    result = _score_order_flow(ofi_1m, ofi_5m, ofi_15m, ofi_1h, volume_spike, latest_price)
+    result["slug"] = slug
+    result["updated_at"] = time.time()
+    return result
 
 def price_impact_evaluator_worker():
     """

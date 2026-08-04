@@ -42,7 +42,9 @@ PYBIND11_MODULE(polymarket_core, m) {
         .def_readonly("latency_bucket_1000us_plus", &polymarket::MetricsSnapshot::latency_bucket_1000us_plus);
 
     py::class_<polymarket::CoreEngine>(m, "CoreEngine")
-        .def(py::init<std::size_t, std::size_t>(), py::arg("pool_capacity"), py::arg("queue_capacity"))
+        .def(py::init<std::size_t, std::size_t, double, double>(),
+             py::arg("pool_capacity"), py::arg("queue_capacity"),
+             py::arg("long_shot_price_threshold"), py::arg("large_trade_usd_threshold"))
         .def("process_json", &polymarket::CoreEngine::process_json, py::arg("json"), 
              "Processes a raw incoming WebSocket data frame text.")
         .def("pop_priority", static_cast<std::unique_ptr<polymarket::RawTrade> (polymarket::CoreEngine::*)()>(

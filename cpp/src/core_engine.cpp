@@ -5,12 +5,19 @@ namespace polymarket {
 
     // Keep pool_ in the initializer list if other components need it, 
     // but we remove its usage from our parsing hot-path.
-    CoreEngine::CoreEngine(std::size_t pool_capacity, std::size_t queue_capacity)
+    CoreEngine::CoreEngine(
+        std::size_t pool_capacity,
+        std::size_t queue_capacity,
+        double long_shot_price_threshold,
+        double large_trade_usd_threshold
+    )
         : pool_(pool_capacity),
           priority_queue_(),
           normal_queue_(),
           filter_(),
-          metrics_() {}
+          metrics_(),
+          long_shot_price_threshold_(long_shot_price_threshold),
+          large_trade_usd_threshold_(large_trade_usd_threshold) {}
 
     bool CoreEngine::process_json(std::string_view json) {
         if (json == "ping" || json == "\"ping\"" || json.empty()) [[unlikely]] {
@@ -41,7 +48,7 @@ namespace polymarket {
         }
 
         // Run anomaly detection flags
-        AnomalyScore flags = score_trade(trade);
+        AnomalyScore flags = score_trade(trade, long_shot_price_threshold_, large_trade_usd_threshold_);
 
         bool pushed = false;
         if (flags.score > 0) {

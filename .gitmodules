@@ -1,0 +1,4 @@
+[submodule "vendor/signal-core"]
+	path = vendor/signal-core
+	url = https://github.com/NoahB667/polymarket-signal-core.git
+	branch = main

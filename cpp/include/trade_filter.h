@@ -9,10 +9,14 @@
 namespace polymarket {
 
     // Global, inline-optimized anomaly pre-filter
-    inline AnomalyScore score_trade(const RawTrade& trade) noexcept {
-        bool is_large_trade = (trade.usd >= 10000.0);
-        bool is_long_shot   = (trade.price > 0.0 && trade.price <= 0.20);
-        
+    inline AnomalyScore score_trade(
+        const RawTrade& trade,
+        double long_shot_price_threshold,
+        double large_trade_usd_threshold
+    ) noexcept {
+        bool is_large_trade = (trade.usd >= large_trade_usd_threshold);
+        bool is_long_shot   = (trade.price > 0.0 && trade.price <= long_shot_price_threshold);
+
         // Volume spike checking will be calculated in Step 5 using Redis data
         std::uint8_t total_score = static_cast<std::uint8_t>(is_large_trade) + static_cast<std::uint8_t>(is_long_shot);
 

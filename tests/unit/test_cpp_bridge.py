@@ -28,3 +28,29 @@ def test_cpp_bridge_priority_flow():
     # 4. Check queues
     trade = engine.pop_priority() or engine.pop_normal()
     assert trade is not None, "Trade vanished after processing"
+
+
+def test_cpp_bridge_passes_signal_core_thresholds(monkeypatch):
+    """CoreEngineBridge must source both trade-filter thresholds from signal_core
+    and forward them positionally to the C++ constructor -- this is the one
+    place the real calibrated values cross from private signal_core into the
+    running system."""
+    import core.cpp_bridge as cpp_bridge_module
+
+    captured_args = {}
+
+    class _FakeCoreEngine:
+        def __init__(self, pool_capacity, queue_capacity, long_shot_price_threshold, large_trade_usd_threshold):
+            captured_args["pool_capacity"] = pool_capacity
+            captured_args["queue_capacity"] = queue_capacity
+            captured_args["long_shot_price_threshold"] = long_shot_price_threshold
+            captured_args["large_trade_usd_threshold"] = large_trade_usd_threshold
+
+    monkeypatch.setattr(cpp_bridge_module._cpp, "CoreEngine", _FakeCoreEngine)
+
+    cpp_bridge_module.CoreEngineBridge(pool_capacity=16, queue_capacity=16)
+
+    assert captured_args["pool_capacity"] == 16
+    assert captured_args["queue_capacity"] == 16
+    assert captured_args["long_shot_price_threshold"] == cpp_bridge_module.LONG_SHOT_PRICE_THRESHOLD
+    assert captured_args["large_trade_usd_threshold"] == cpp_bridge_module.LARGE_TRADE_USD_THRESHOLD
