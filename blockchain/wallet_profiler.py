@@ -13,10 +13,15 @@ from typing import Any, Dict, List, Optional
 
 import orjson
 
+from blockchain.event_decoder import OrderFilledEvent
 from models.orm import OnchainTrade, WalletProfile as WalletProfileORM
 from models.dataclasses import Signal2Score
 from signal_core.models import WalletProfile as WalletProfileDTO
-from signal_core.wallet_intelligence import compile_profile, calculate_insider_score
+from signal_core.wallet_intelligence import (
+    compile_profile,
+    calculate_insider_score,
+    LONG_SHOT_PRICE_THRESHOLD,
+)
 from signal_core.wallet_risk import HIGH_INSIDER_SCORE_THRESHOLD
 
 logger = logging.getLogger("polymarket.blockchain.wallet_profiler")
@@ -271,3 +276,38 @@ def build_signal2_score(db: Any, market_id: str, redis_client: Any) -> Signal2Sc
         sample_size=sample_size,
         confidence=round(confidence, 4),
     )
+
+
+def increment_wallet_counters(db: Any, event: OrderFilledEvent) -> None:
+    """Cheap, hot-path-safe counter bump for a newly-seen live trade.
+
+    Does NOT recompute insider_score (that requires reading every trade for
+    the wallet -- too expensive to do per-event). Instead marks the profile
+    score_stale=True; the hourly score-recalculation loop
+    (core.wallet_intelligence_scheduler.run_score_recalculation_loop) drains
+    stale profiles through the full profile_wallet() pipeline.
+
+    Best-effort: caller (PolygonSyncService) wraps this in try/except and
+    must not let a DB failure here stop the sync loop.
+
+    Args:
+        db: SQLAlchemy session.
+        event: The decoded, taker-side-filtered OrderFilledEvent.
+    """
+    profile = db.query(WalletProfileORM).filter_by(wallet_address=event.maker).first()
+    if profile is None:
+        profile = WalletProfileORM(
+            wallet_address=event.maker,
+            total_trades=0,
+            long_shot_attempts=0,
+            last_updated=time.time(),
+        )
+        db.add(profile)
+
+    profile.total_trades += 1
+    profile.last_updated = time.time()
+    profile.score_stale = True
+    if event.implied_price < LONG_SHOT_PRICE_THRESHOLD:
+        profile.long_shot_attempts += 1
+
+    db.commit()
