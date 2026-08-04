@@ -17,9 +17,10 @@ import time
 from typing import Any, List, Optional
 
 from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
 
 from blockchain.event_decoder import blockchain_id, decode_log, is_taker_side, OrderFilledEvent
-from blockchain.polygon_contracts import TAKER_ADDRESSES, ORDER_FILLED_TOPIC0
+from blockchain.polygon_contracts import TAKER_ADDRESSES, ORDER_FILLED_TOPIC0_V1, ORDER_FILLED_TOPIC0_V2
 from blockchain.wallet_profiler import increment_wallet_counters
 from models.orm import OnchainTrade, PolygonSyncState
 
@@ -54,6 +55,12 @@ class PolygonSyncService:
         self.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS
         self.max_catchup_blocks = DEFAULT_MAX_CATCHUP_BLOCKS
         self._w3 = Web3(Web3.HTTPProvider(rpc_url))
+        # Polygon is a PoA-style chain -- its block headers' extraData field
+        # exceeds the 32 bytes web3.py's default block formatter expects,
+        # raising ExtraDataLengthError on every eth_getBlock call (used
+        # below to resolve block timestamps) without this. Confirmed live:
+        # _decode_logs crashed on the very first real batch without it.
+        self._w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self.metrics = {
@@ -104,13 +111,20 @@ class PolygonSyncService:
                 continue
 
             if current_block > last_processed:
-                logs = self._fetch_logs(last_processed + 1, current_block)
+                logs, last_successful_block = self._fetch_logs(last_processed + 1, current_block)
                 db = self.db_session_factory()
                 try:
                     events_processed = self._process_batch(db, self._decode_logs(logs))
                 finally:
                     db.close()
-                last_processed = current_block
+                # Only advance past blocks eth_getLogs actually returned --
+                # if a chunk exhausted its retries (e.g. the RPC's real
+                # eth_getLogs range cap is far below max_blocks_per_query,
+                # observed live to be as low as 10 blocks on some plans vs.
+                # this project's 1000-block default), last_successful_block
+                # stops short of current_block so those blocks are retried
+                # next cycle instead of being silently skipped forever.
+                last_processed = last_successful_block
                 self._save_last_block(last_processed, events_processed)
                 self.metrics["last_synced_block"] = last_processed
                 self.metrics["blocks_behind"] = max(0, self._w3.eth.block_number - last_processed)
@@ -130,29 +144,46 @@ class PolygonSyncService:
                 events.append(event)
         return events
 
-    def _fetch_logs(self, from_block: int, to_block: int) -> List[Any]:
+    def _fetch_logs(self, from_block: int, to_block: int) -> "tuple[List[Any], int]":
         """Chunked eth_getLogs across [from_block, to_block], filtered to
         OrderFilled on the known exchange contracts, with retry/backoff.
+
+        Stops at the first chunk that exhausts its retries rather than
+        skipping past it -- a gap here would otherwise let the caller
+        advance last_processed_block beyond blocks that were never
+        actually fetched, permanently losing that range's trades.
+
+        Returns:
+            (logs, last_successful_block) -- last_successful_block is the
+            highest block number successfully covered without a gap; it
+            equals from_block - 1 if even the first chunk failed.
         """
         all_logs: List[Any] = []
         chunk_start = from_block
+        last_successful_block = from_block - 1
         while chunk_start <= to_block:
             chunk_end = min(chunk_start + self.max_blocks_per_query - 1, to_block)
-            logs = self._fetch_chunk_with_retry(chunk_start, chunk_end)
+            logs, success = self._fetch_chunk_with_retry(chunk_start, chunk_end)
+            if not success:
+                break
             all_logs.extend(logs)
+            last_successful_block = chunk_end
             chunk_start = chunk_end + 1
-        return all_logs
+        return all_logs, last_successful_block
 
-    def _fetch_chunk_with_retry(self, from_block: int, to_block: int) -> List[Any]:
+    def _fetch_chunk_with_retry(self, from_block: int, to_block: int) -> "tuple[List[Any], bool]":
         filter_params = {
             "fromBlock": from_block,
             "toBlock": to_block,
             "address": [Web3.to_checksum_address(a) for a in TAKER_ADDRESSES],
-            "topics": [ORDER_FILLED_TOPIC0],
+            # V1 and V2 have different OrderFilled topic0 values (see
+            # polygon_contracts.py's module docstring) -- a nested list at a
+            # topics position is an OR filter, matching either.
+            "topics": [[ORDER_FILLED_TOPIC0_V1, ORDER_FILLED_TOPIC0_V2]],
         }
         for attempt in range(MAX_RETRIES):
             try:
-                return self._w3.eth.get_logs(filter_params)
+                return self._w3.eth.get_logs(filter_params), True
             except Exception as e:
                 self.metrics["rpc_errors_total"] += 1
                 message = str(e).lower()
@@ -166,7 +197,7 @@ class PolygonSyncService:
                     logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {e}")
                     time.sleep(RETRY_DELAY_SECONDS)
         logger.error(f"Polygon sync: eth_getLogs failed after {MAX_RETRIES} retries, skipping {from_block}-{to_block}")
-        return []
+        return [], False
 
     def _process_batch(self, db: Any, events: List[OrderFilledEvent]) -> int:
         """Filters to taker-side events, dedupes, writes OnchainTrade rows,

@@ -8,23 +8,31 @@ if str(root_path) not in sys.path:
 from eth_abi import encode
 from web3 import Web3
 
-from blockchain.polygon_contracts import CTF_EXCHANGE_V2
+from blockchain.polygon_contracts import CTF_EXCHANGE_V2, CTF_EXCHANGE_V1
 from blockchain.event_decoder import decode_log, is_taker_side, blockchain_id
 
 w3 = Web3()
 
-ORDER_FILLED_SIG = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
+# Confirmed live against Polymarket/ctf-exchange-v2's real ITrading.sol --
+# see polygon_contracts.py's module docstring. 10 fields, not the reference
+# doc's claimed 8: side is uint8 (Solidity enum), plus trailing
+# builder/metadata bytes32 fields.
+ORDER_FILLED_SIG_V2 = "OrderFilled(bytes32,address,address,uint8,uint256,uint256,uint256,uint256,bytes32,bytes32)"
+ORDER_FILLED_SIG_V1 = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
 
 
-def _build_v2_log(side=0, maker_amount=5_000_000, taker_amount=10 * 10**18, taker=CTF_EXCHANGE_V2):
+def _build_v2_log(side=0, maker_amount=5_000_000, taker_amount=10, taker=CTF_EXCHANGE_V2):
+    # taker_amount (shares) is an UNSCALED integer count on V2 -- confirmed
+    # live by decoding real trades; dividing by 1e18 produced implied
+    # prices in the thousands against real chain data.
     data = encode(
-        ["uint256", "uint256", "uint256", "uint256", "uint256"],
-        [side, 4242, maker_amount, taker_amount, 0],
+        ["uint8", "uint256", "uint256", "uint256", "uint256", "bytes32", "bytes32"],
+        [side, 4242, maker_amount, taker_amount, 0, b"\x00" * 32, b"\x00" * 32],
     )
     maker = "0x" + "11" * 20
     order_hash = "0x" + "22" * 32
     topics = [
-        w3.keccak(text=ORDER_FILLED_SIG),
+        w3.keccak(text=ORDER_FILLED_SIG_V2),
         bytes.fromhex(order_hash[2:]),
         bytes(12) + bytes.fromhex(maker[2:]),
         bytes(12) + bytes.fromhex(taker[2:].lower()),
@@ -42,7 +50,7 @@ def _build_v2_log(side=0, maker_amount=5_000_000, taker_amount=10 * 10**18, take
 
 
 def test_decode_v2_buy_event():
-    raw_log = _build_v2_log(side=0)
+    raw_log = _build_v2_log(side=0, maker_amount=5_000_000, taker_amount=10)
     event = decode_log(raw_log, w3, block_timestamp=1234567890.0)
     assert event is not None
     assert event.contract_version == "v2"
@@ -78,6 +86,14 @@ def test_decode_returns_none_for_unknown_topic0():
     assert decode_log(raw_log, w3, block_timestamp=1234567890.0) is None
 
 
+def test_decode_returns_none_for_v1_topic0_on_v2_address():
+    # V1 and V2 have different topic0s -- a V1-shaped log at a V2 address
+    # (or vice versa) must not decode.
+    raw_log = _build_v2_log()
+    raw_log["topics"][0] = w3.keccak(text=ORDER_FILLED_SIG_V1)
+    assert decode_log(raw_log, w3, block_timestamp=1234567890.0) is None
+
+
 def test_blockchain_id_format():
     raw_log = _build_v2_log()
     event = decode_log(raw_log, w3, block_timestamp=1234567890.0)
@@ -86,8 +102,6 @@ def test_blockchain_id_format():
 
 
 def test_decode_v1_event_infers_side_from_maker_asset_id():
-    from blockchain.polygon_contracts import CTF_EXCHANGE_V1
-
     data = encode(
         ["uint256", "uint256", "uint256", "uint256", "uint256"],
         [0, 4242, 5_000_000, 10 * 10**18, 0],  # makerAssetId=0 -> BUY
@@ -95,7 +109,7 @@ def test_decode_v1_event_infers_side_from_maker_asset_id():
     maker = "0x" + "11" * 20
     order_hash = "0x" + "22" * 32
     topics = [
-        w3.keccak(text=ORDER_FILLED_SIG),
+        w3.keccak(text=ORDER_FILLED_SIG_V1),
         bytes.fromhex(order_hash[2:]),
         bytes(12) + bytes.fromhex(maker[2:]),
         bytes(12) + bytes.fromhex(CTF_EXCHANGE_V1[2:].lower()),
@@ -114,3 +128,4 @@ def test_decode_v1_event_infers_side_from_maker_asset_id():
     assert event.contract_version == "v1"
     assert event.maker_side == "BUY"
     assert event.token_id == "4242"  # takerAssetId
+    assert event.shares == 10.0  # V1: still divided by 1e18 (unverified live, see event_decoder.py)

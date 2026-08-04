@@ -13,7 +13,8 @@ from web3 import Web3
 from blockchain.polygon_contracts import (
     ORDER_FILLED_ABI_V1,
     ORDER_FILLED_ABI_V2,
-    ORDER_FILLED_TOPIC0,
+    ORDER_FILLED_TOPIC0_V1,
+    ORDER_FILLED_TOPIC0_V2,
     TAKER_ADDRESSES,
     V2_EXCHANGE_ADDRESSES,
 )
@@ -21,7 +22,16 @@ from blockchain.polygon_contracts import (
 logger = logging.getLogger("polymarket.blockchain.event_decoder")
 
 USD_DECIMALS = 1_000_000
-SHARE_DECIMALS = 1_000_000_000_000_000_000
+# V1's takerAmountFilled decimal scaling is UNVERIFIED against a live V1
+# trade (no V1 activity was observed in ~1.5 hours of live scanning during
+# development -- consistent with reference/polygon_live_monitor.md's
+# framing of V1 as low-volume long-tail). This 1e18 assumption matches the
+# doc's original claim and V1's ABI shape did independently verify correct
+# against Polymarket/ctf-exchange's real source, but the *decimals* claim
+# itself was never cross-checked the way V2's was. Verify against a real
+# V1 OrderFilled log before trusting V1 implied_price/usd_amount in
+# production -- V2's equivalent assumption was found wrong (see below).
+V1_SHARE_DECIMALS = 1_000_000_000_000_000_000
 
 
 @dataclass
@@ -67,13 +77,19 @@ def decode_log(raw_log: Dict[str, Any], w3: Web3, block_timestamp: float) -> Opt
         The decoded event, or None if topic0 doesn't match OrderFilled (an
         unrelated log slipped through the address filter) or decoding fails.
     """
-    topic0_hex = _to_hex(raw_log["topics"][0])
-    if topic0_hex.lower() != ORDER_FILLED_TOPIC0.lower():
-        return None
-
+    # Version is determined by contract address, not topic0 -- V1 and V2
+    # have genuinely different OrderFilled shapes/topic0 values (see
+    # polygon_contracts.py's module docstring), so topic0 is validated
+    # against whichever version the address implies, not a single shared
+    # constant.
     address = raw_log["address"].lower()
     version = "v2" if address in V2_EXCHANGE_ADDRESSES else "v1"
+    expected_topic0 = ORDER_FILLED_TOPIC0_V2 if version == "v2" else ORDER_FILLED_TOPIC0_V1
     abi = ORDER_FILLED_ABI_V2 if version == "v2" else ORDER_FILLED_ABI_V1
+
+    topic0_hex = _to_hex(raw_log["topics"][0])
+    if topic0_hex.lower() != expected_topic0.lower():
+        return None
 
     try:
         contract = w3.eth.contract(abi=abi)
@@ -86,15 +102,23 @@ def decode_log(raw_log: Dict[str, Any], w3: Web3, block_timestamp: float) -> Opt
     maker_amount = args["makerAmountFilled"]
     taker_amount = args["takerAmountFilled"]
     usd_amount = maker_amount / USD_DECIMALS
-    shares = taker_amount / SHARE_DECIMALS
-    implied_price = usd_amount / shares if shares > 0 else 0.0
 
     if version == "v2":
+        # Confirmed live: V2's takerAmountFilled is an UNSCALED integer
+        # share count, not 18-decimal fixed-point as
+        # reference/polygon_live_monitor.md claimed -- dividing by 1e18
+        # produced implied_price values in the thousands (invalid;
+        # probabilities must be in [0, 1]) against real chain data. See
+        # polygon_contracts.py's module docstring for how this was verified.
+        shares = float(taker_amount)
         maker_side = "BUY" if args["side"] == 0 else "SELL"
         token_id = str(args["tokenId"])
     else:
+        shares = taker_amount / V1_SHARE_DECIMALS
         maker_side = "BUY" if args["makerAssetId"] == 0 else "SELL"
         token_id = str(args["takerAssetId"])
+
+    implied_price = usd_amount / shares if shares > 0 else 0.0
 
     return OrderFilledEvent(
         order_hash=_to_hex(args["orderHash"]),

@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
@@ -136,9 +136,11 @@ def test_fetch_logs_chunks_large_ranges():
     service._w3 = w3
     service.max_blocks_per_query = 1000
 
-    service._fetch_logs(from_block=1, to_block=2500)
+    logs, last_successful_block = service._fetch_logs(from_block=1, to_block=2500)
 
     assert w3.eth.get_logs.call_count == 3  # 1-1000, 1001-2000, 2001-2500
+    assert last_successful_block == 2500
+    assert logs == []
 
 
 def test_fetch_logs_halves_chunk_on_block_range_error():
@@ -148,9 +150,50 @@ def test_fetch_logs_halves_chunk_on_block_range_error():
     service._w3 = w3
     service.max_blocks_per_query = 1000
 
-    logs = service._fetch_logs(from_block=1, to_block=1000)
+    logs, last_successful_block = service._fetch_logs(from_block=1, to_block=1000)
 
     assert service.max_blocks_per_query == 500
+    assert logs == []
+    assert last_successful_block == 1000  # eventually covered despite the retry
+
+
+def test_fetch_logs_stops_at_first_persistently_failing_chunk():
+    """Regression test: discovered live that a real RPC plan can cap
+    eth_getLogs far below max_blocks_per_query (10 blocks vs. this
+    project's 1000-block default). A chunk that exhausts all retries must
+    NOT be silently skipped -- the caller needs to know sync stopped short
+    so it doesn't advance last_processed_block past unfetched blocks
+    (which would permanently lose that range's trades).
+    """
+    w3 = MagicMock()
+    # First 1000-block chunk (1-1000) succeeds; second chunk (1001-2000)
+    # fails all MAX_RETRIES (3) attempts; a third chunk must never be
+    # attempted since _fetch_logs should stop at the first failure.
+    w3.eth.get_logs.side_effect = [
+        [],  # chunk 1: 1-1000, succeeds
+        Exception("boom"), Exception("boom"), Exception("boom"),  # chunk 2: exhausts retries
+    ]
+    service = _service()
+    service._w3 = w3
+    service.max_blocks_per_query = 1000
+
+    with patch("blockchain.polygon_sync.time.sleep"):
+        logs, last_successful_block = service._fetch_logs(from_block=1, to_block=3000)
+
+    assert last_successful_block == 1000  # stopped after the last successful chunk
+    assert w3.eth.get_logs.call_count == 4  # 1 success + 3 exhausted retries, chunk 3 never attempted
+
+
+def test_fetch_chunk_with_retry_returns_failure_after_exhausting_retries():
+    w3 = MagicMock()
+    w3.eth.get_logs.side_effect = Exception("boom")
+    service = _service()
+    service._w3 = w3
+
+    with patch("blockchain.polygon_sync.time.sleep"):
+        logs, success = service._fetch_chunk_with_retry(1, 10)
+
+    assert success is False
     assert logs == []
 
 
