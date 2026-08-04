@@ -155,7 +155,27 @@ def _ingest_rows(
     for row in dune.fetch_results_paginated(execution_id):
         blockchain_id = row.get("blockchain_id")
         try:
-            if db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first():
+            existing = db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first()
+            if existing is not None:
+                # Step 9's live monitor may have inserted this row first with
+                # category/question/resolved_outcome left NULL (it has no
+                # tokenId -> market metadata resolver) -- backfill those
+                # fields now rather than permanently skipping them. A row
+                # that already has a category came from a prior Dune
+                # ingestion and is left untouched.
+                if existing.category is None:
+                    market_id = row.get("market_id")
+                    resolution = (
+                        resolution_client.resolve_market(market_id)
+                        if market_id
+                        else MarketResolution(resolved_outcome=None, market_end_time=None)
+                    )
+                    existing.question = existing.question or row.get("question")
+                    existing.outcome = existing.outcome or row.get("outcome")
+                    existing.category = classify_category(row.get("event_market_name", ""))
+                    existing.resolved_outcome = existing.resolved_outcome or resolution.resolved_outcome
+                    existing.market_end_time = existing.market_end_time or resolution.market_end_time
+                    db.commit()
                 continue
 
             market_id = row.get("market_id")

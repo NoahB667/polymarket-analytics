@@ -187,6 +187,89 @@ def test_run_wallet_intelligence_loop_disabled_does_nothing():
     mock_cycle.assert_not_called()
 
 
+def test_ingest_rows_enriches_existing_sparse_row():
+    """A row the Step 9 live monitor inserted first (category=None) must get
+    enriched, not permanently skipped, when Dune later re-sees the same
+    blockchain_id.
+    """
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(OnchainTrade(
+        blockchain_id="AAAA-0", wallet_address="0xabc", market_id="0xmkt",
+        question=None, outcome=None, category=None,
+        usd_volume=5.0, entry_price=0.5, block_timestamp=time.time(),
+    ))
+    db.commit()
+    db.close()
+
+    fake_dune = MagicMock()
+    fake_dune.fetch_results_paginated.return_value = iter([
+        {
+            "blockchain_id": "AAAA-0", "wallet_address": "0xabc", "market_id": "0xmkt",
+            "event_market_name": "Fed rate cut", "question": "Will the Fed cut rates?",
+            "outcome": "Yes", "usd_volume": 5.0, "entry_price": 0.5,
+            "block_timestamp": time.time(),
+        },
+    ])
+
+    fake_resolution_client = MagicMock()
+    fake_resolution_client.resolve_market.return_value = wis.MarketResolution(
+        resolved_outcome="Yes", market_end_time=1999999999.0
+    )
+
+    db = session_factory()
+    ingested = wis._ingest_rows(db, fake_dune, "exec-1", fake_resolution_client)
+    db.close()
+
+    assert ingested == 0  # not a new row -- enrichment doesn't count as "ingested"
+
+    db = session_factory()
+    row = db.query(OnchainTrade).filter_by(blockchain_id="AAAA-0").first()
+    assert row.category is not None
+    assert row.question == "Will the Fed cut rates?"
+    assert row.outcome == "Yes"
+    assert row.resolved_outcome == "Yes"
+    assert row.market_end_time == 1999999999.0
+    db.close()
+
+
+def test_ingest_rows_does_not_re_enrich_already_categorized_row():
+    """A row that already has a category (came from a prior Dune ingestion,
+    not the live monitor) must not be touched again -- category is set once.
+    """
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(OnchainTrade(
+        blockchain_id="BBBB-0", wallet_address="0xabc", market_id="0xmkt",
+        question="Original question", outcome="No", category="fed",
+        usd_volume=5.0, entry_price=0.5, block_timestamp=time.time(),
+    ))
+    db.commit()
+    db.close()
+
+    fake_dune = MagicMock()
+    fake_dune.fetch_results_paginated.return_value = iter([
+        {
+            "blockchain_id": "BBBB-0", "wallet_address": "0xabc", "market_id": "0xmkt",
+            "event_market_name": "Different event", "question": "A different question?",
+            "outcome": "Yes", "usd_volume": 5.0, "entry_price": 0.5,
+            "block_timestamp": time.time(),
+        },
+    ])
+    fake_resolution_client = MagicMock()
+
+    db = session_factory()
+    wis._ingest_rows(db, fake_dune, "exec-1", fake_resolution_client)
+    db.close()
+
+    fake_resolution_client.resolve_market.assert_not_called()
+    db = session_factory()
+    row = db.query(OnchainTrade).filter_by(blockchain_id="BBBB-0").first()
+    assert row.question == "Original question"
+    assert row.category == "fed"
+    db.close()
+
+
 def test_run_wallet_intelligence_loop_runs_cycle_when_enabled():
     stop_event = threading.Event()
 
