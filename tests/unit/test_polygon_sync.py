@@ -1,0 +1,166 @@
+import sys
+import time
+from pathlib import Path
+from unittest.mock import MagicMock
+
+root_path = Path(__file__).resolve().parents[2]
+if str(root_path) not in sys.path:
+    sys.path.insert(0, str(root_path))
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from db import Base
+from models.orm import OnchainTrade, PolygonSyncState, WalletProfile
+
+from blockchain.polygon_sync import PolygonSyncService
+from blockchain.event_decoder import OrderFilledEvent
+from blockchain.polygon_contracts import CTF_EXCHANGE_V2
+
+
+def _session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine)
+
+
+def _service(**overrides):
+    kwargs = dict(rpc_url="https://fake-rpc", db_session_factory=_session_factory(), redis_client=MagicMock())
+    kwargs.update(overrides)
+    return PolygonSyncService(**kwargs)
+
+
+def _event(tx="0x" + "3" * 64, log_index=0, maker="0xmaker", taker=CTF_EXCHANGE_V2):
+    return OrderFilledEvent(
+        order_hash="0x" + "1" * 64, maker=maker, taker=taker, token_id="4242",
+        usd_amount=5.0, shares=10.0, implied_price=0.5, maker_side="BUY", fee_usd=0.0,
+        contract_version="v2", block_number=100, block_timestamp=time.time(),
+        tx_hash=tx, log_index=log_index,
+    )
+
+
+def test_get_last_block_reads_redis_first():
+    redis_client = MagicMock()
+    redis_client.get.return_value = "500"
+    service = _service(redis_client=redis_client)
+    assert service._get_last_block() == 500
+
+
+def test_get_last_block_falls_back_to_postgres_then_default():
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+    session_factory = _session_factory()
+    db = session_factory()
+    db.add(PolygonSyncState(last_block=777, last_updated=time.time()))
+    db.commit()
+    db.close()
+
+    service = _service(redis_client=redis_client, db_session_factory=session_factory)
+    assert service._get_last_block() == 777
+
+
+def test_get_last_block_returns_none_when_nothing_stored():
+    redis_client = MagicMock()
+    redis_client.get.return_value = None
+    service = _service(redis_client=redis_client)
+    assert service._get_last_block() is None
+
+
+def test_save_last_block_writes_redis_and_postgres():
+    redis_client = MagicMock()
+    session_factory = _session_factory()
+    service = _service(redis_client=redis_client, db_session_factory=session_factory)
+
+    service._save_last_block(999, events_processed=3)
+
+    redis_client.set.assert_called_with("polygon:last_block", 999)
+    db = session_factory()
+    row = db.query(PolygonSyncState).first()
+    assert row.last_block == 999
+    assert row.events_processed == 3
+
+
+def test_process_batch_inserts_new_onchain_trade_and_increments_wallet():
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+
+    service._process_batch(db, [_event()])
+
+    trade = db.query(OnchainTrade).first()
+    assert trade is not None
+    assert trade.wallet_address == "0xmaker"
+    profile = db.query(WalletProfile).filter_by(wallet_address="0xmaker").first()
+    assert profile.total_trades == 1
+
+
+def test_process_batch_skips_non_taker_side_events():
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+
+    service._process_batch(db, [_event(taker="0x" + "9" * 40)])
+
+    assert db.query(OnchainTrade).count() == 0
+
+
+def test_process_batch_is_idempotent_on_duplicate_blockchain_id():
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+    event = _event()
+
+    service._process_batch(db, [event])
+    service._process_batch(db, [event])  # same tx_hash + log_index
+
+    assert db.query(OnchainTrade).count() == 1
+    profile = db.query(WalletProfile).filter_by(wallet_address="0xmaker").first()
+    assert profile.total_trades == 1  # not double-counted
+
+
+def test_process_batch_one_bad_event_does_not_abort_batch():
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+    good = _event(tx="0x" + "5" * 64)
+    bad = _event(tx="0x" + "6" * 64, maker=None)  # None wallet_address -> DB error
+
+    service._process_batch(db, [bad, good])
+
+    assert db.query(OnchainTrade).filter_by(wallet_address="0xmaker").count() == 1
+
+
+def test_fetch_logs_chunks_large_ranges():
+    w3 = MagicMock()
+    w3.eth.get_logs.return_value = []
+    service = _service()
+    service._w3 = w3
+    service.max_blocks_per_query = 1000
+
+    service._fetch_logs(from_block=1, to_block=2500)
+
+    assert w3.eth.get_logs.call_count == 3  # 1-1000, 1001-2000, 2001-2500
+
+
+def test_fetch_logs_halves_chunk_on_block_range_error():
+    w3 = MagicMock()
+    w3.eth.get_logs.side_effect = [Exception("block range too large"), []]
+    service = _service()
+    service._w3 = w3
+    service.max_blocks_per_query = 1000
+
+    logs = service._fetch_logs(from_block=1, to_block=1000)
+
+    assert service.max_blocks_per_query == 500
+    assert logs == []
+
+
+def test_process_batch_updates_metrics_counters():
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+
+    service._process_batch(db, [_event(), _event(tx="0x" + "7" * 64, taker="0x" + "9" * 40)])
+
+    assert service.metrics["events_processed_total"] == 1
+    assert service.metrics["events_skipped_total"] == 1
+    assert service.metrics["wallet_profiles_updated_total"] == 1
