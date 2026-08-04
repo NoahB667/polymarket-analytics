@@ -11,7 +11,7 @@ if str(root_path) not in sys.path:
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from db import Base
-from models.orm import AutoSubscription, OnchainTrade
+from models.orm import AutoSubscription, OnchainTrade, WalletProfile
 
 import core.wallet_intelligence_scheduler as wis
 
@@ -268,6 +268,48 @@ def test_ingest_rows_does_not_re_enrich_already_categorized_row():
     assert row.question == "Original question"
     assert row.category == "fed"
     db.close()
+
+
+def test_run_score_recalculation_cycle_clears_stale_flag():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(WalletProfile(wallet_address="0xstale", total_trades=1, score_stale=True, last_updated=time.time()))
+    db.add(WalletProfile(wallet_address="0xfresh", total_trades=1, score_stale=False, last_updated=time.time()))
+    db.commit()
+    db.close()
+
+    summary = wis.run_score_recalculation_cycle(redis_client=None, session_factory=session_factory)
+
+    assert summary["stale_wallets"] == 1
+    assert summary["recalculated"] == 1
+    db = session_factory()
+    row = db.query(WalletProfile).filter_by(wallet_address="0xstale").first()
+    assert row.score_stale is False
+    db.close()
+
+
+def test_run_score_recalculation_cycle_survives_per_wallet_failure():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(WalletProfile(wallet_address="0xbad", total_trades=1, score_stale=True, last_updated=time.time()))
+    db.commit()
+    db.close()
+
+    with patch.object(wis, "profile_wallet", side_effect=Exception("simulated failure")):
+        summary = wis.run_score_recalculation_cycle(redis_client=None, session_factory=session_factory)
+
+    assert summary["stale_wallets"] == 1
+    assert summary["recalculated"] == 0
+    db = session_factory()
+    row = db.query(WalletProfile).filter_by(wallet_address="0xbad").first()
+    assert row.score_stale is True  # still stale -- will retry next cycle
+    db.close()
+
+
+def test_run_score_recalculation_cycle_no_stale_wallets():
+    session_factory = _sqlite_session_factory()
+    summary = wis.run_score_recalculation_cycle(redis_client=None, session_factory=session_factory)
+    assert summary == {"stale_wallets": 0, "recalculated": 0}
 
 
 def test_run_wallet_intelligence_loop_runs_cycle_when_enabled():
