@@ -197,6 +197,31 @@ def test_fetch_chunk_with_retry_returns_failure_after_exhausting_retries():
     assert logs == []
 
 
+def test_decode_logs_caches_block_timestamp_lookups_per_distinct_block():
+    """Regression test: discovered live that a single Polygon block can
+    carry 40+ OrderFilled logs. An uncached eth_getBlock call per log
+    (rather than per distinct block number) turned a real ~100-block batch
+    of ~8,400 logs into ~8,400 RPC round-trips (~21 minutes) instead of
+    ~100 -- catastrophically slower than the 2-second poll interval.
+    """
+    service = _service()
+    w3 = MagicMock()
+    w3.eth.get_block.return_value = {"timestamp": 1234567890}
+    service._w3 = w3
+
+    raw_logs = [
+        {"blockNumber": 100, "logIndex": 0},
+        {"blockNumber": 100, "logIndex": 1},
+        {"blockNumber": 100, "logIndex": 2},
+        {"blockNumber": 101, "logIndex": 0},
+    ]
+    with patch("blockchain.polygon_sync.decode_log", return_value=None) as mock_decode:
+        service._decode_logs(raw_logs)
+
+    assert w3.eth.get_block.call_count == 2  # once for block 100, once for block 101
+    assert mock_decode.call_count == 4  # every log still gets decoded
+
+
 def test_process_batch_updates_metrics_counters():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)

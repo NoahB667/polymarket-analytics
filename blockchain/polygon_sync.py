@@ -87,7 +87,11 @@ class PolygonSyncService:
         try:
             current_block = self._w3.eth.block_number
         except Exception as e:
-            logger.error(f"Polygon sync: could not reach RPC {self.rpc_url}: {e}")
+            # Never interpolate self.rpc_url or the raw exception `e` here --
+            # RPC URLs commonly embed an API key (e.g. Alchemy's
+            # /v2/<key> path), and some HTTP client exceptions embed the
+            # full request URL in their default __str__.
+            logger.error(f"Polygon sync: could not reach RPC endpoint on startup ({type(e).__name__})")
             return
 
         last_processed = self._get_last_block()
@@ -132,11 +136,22 @@ class PolygonSyncService:
             self._stop_event.wait(self.poll_interval_seconds)
 
     def _decode_logs(self, logs: List[Any]) -> List[OrderFilledEvent]:
+        """Decodes raw logs, resolving each distinct block's timestamp only
+        once. Confirmed live: a single block can carry 40+ OrderFilled logs,
+        so an uncached eth_getBlock call per log (rather than per distinct
+        block number) turned a ~100-block batch of ~8,400 logs into ~8,400
+        RPC round-trips (~21 minutes) instead of ~100 -- catastrophically
+        slower than the 2-second poll interval, guaranteeing the service
+        would fall permanently behind in real usage.
+        """
+        block_timestamps: dict = {}
         events = []
         for raw_log in logs:
             try:
-                block = self._w3.eth.get_block(raw_log["blockNumber"])
-                event = decode_log(raw_log, self._w3, block_timestamp=float(block["timestamp"]))
+                block_number = raw_log["blockNumber"]
+                if block_number not in block_timestamps:
+                    block_timestamps[block_number] = float(self._w3.eth.get_block(block_number)["timestamp"])
+                event = decode_log(raw_log, self._w3, block_timestamp=block_timestamps[block_number])
             except Exception as e:
                 logger.error(f"Polygon sync: failed to decode log: {e}")
                 continue
@@ -194,7 +209,9 @@ class PolygonSyncService:
                 elif "rate limit" in message:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                 else:
-                    logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {e}")
+                    # Not `{e}` -- HTTPError's default __str__ embeds the
+                    # full request URL, which may contain an API key.
+                    logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {type(e).__name__}")
                     time.sleep(RETRY_DELAY_SECONDS)
         logger.error(f"Polygon sync: eth_getLogs failed after {MAX_RETRIES} retries, skipping {from_block}-{to_block}")
         return [], False

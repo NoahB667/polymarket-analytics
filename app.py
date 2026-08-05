@@ -12,7 +12,7 @@ from fastapi import FastAPI, HTTPException, Query
 from telegram import Bot
 from dotenv import load_dotenv
 from redis_config import r
-from db import engine, SessionLocal, get_db_session, logger
+from db import engine, SessionLocal, get_db_session, logger, ensure_additive_columns
 
 from models.orm import Base, PriceImpactCheck, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
@@ -333,6 +333,7 @@ def ensure_auto_market_stream(slug: str, token_ids: list) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_additive_columns()
     
     global _writer_thread_started, _pubsub_thread_started, _evaluator_thread_started
     
