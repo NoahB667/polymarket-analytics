@@ -133,7 +133,14 @@ class PolygonSyncService:
                 last_processed = last_successful_block
                 self._save_last_block(last_processed, events_processed)
                 self.metrics["last_synced_block"] = last_processed
-                self.metrics["blocks_behind"] = max(0, self._w3.eth.block_number - last_processed)
+                # Reuses current_block fetched at the top of this iteration
+                # (line 112) rather than a second eth_blockNumber call --
+                # that second call was outside the try/except above, so an
+                # RPC blip here would raise uncaught out of _sync_loop and
+                # silently kill the daemon thread for good (no restart, no
+                # retry), contradicting every other RPC call in this module
+                # being treated as non-fatal.
+                self.metrics["blocks_behind"] = max(0, current_block - last_processed)
 
             self._stop_event.wait(self.poll_interval_seconds)
 

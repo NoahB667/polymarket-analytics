@@ -38,6 +38,69 @@ def _event(tx="0x" + "3" * 64, log_index=0, maker="0xmaker", taker=CTF_EXCHANGE_
     )
 
 
+class _FakeEth:
+    """Minimal eth namespace stand-in for _sync_loop tests. A MagicMock
+    can't cleanly distinguish "block_number accessed twice" from "accessed
+    three times" for a plain attribute (as opposed to a mocked method with
+    call_count) -- this counts accesses explicitly instead.
+    """
+
+    def __init__(self, block_number_value):
+        self._block_number_value = block_number_value
+        self.block_number_access_count = 0
+
+    @property
+    def block_number(self):
+        self.block_number_access_count += 1
+        return self._block_number_value
+
+    def get_logs(self, filter_params):
+        return []
+
+    def get_block(self, block_number):
+        return {"timestamp": time.time()}
+
+
+def test_sync_loop_reuses_current_block_for_blocks_behind_metric():
+    """Regression test: the blocks_behind metric must reuse current_block
+    already fetched this iteration (inside the try/except at the top of
+    the loop), not make a second, unguarded eth_blockNumber call. A second
+    call sitting outside that try/except would, if it raised (a transient
+    RPC blip, rate limit, timeout -- exactly what the rest of this module
+    treats as routine and non-fatal), propagate uncaught out of
+    _sync_loop, silently killing the daemon thread for good with no
+    restart and no retry.
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    service.poll_interval_seconds = 0
+    service.max_blocks_per_query = 1000
+
+    fake_eth = _FakeEth(block_number_value=100)
+    service._w3.eth = fake_eth
+
+    # Run exactly one loop iteration: let the real _stop_event.wait() be
+    # called once (with poll_interval_seconds=0, effectively a no-op
+    # delay), then set the event so the while condition ends the loop on
+    # its next check.
+    real_wait = service._stop_event.wait
+
+    def _stop_after_one_iteration(timeout):
+        result = real_wait(timeout)
+        service._stop_event.set()
+        return result
+
+    service._stop_event.wait = _stop_after_one_iteration
+
+    service._sync_loop()
+
+    # Exactly 2 accesses: the pre-loop fetch, plus one per-iteration fetch.
+    # The old code's extra call at the blocks_behind line would make this 3.
+    assert fake_eth.block_number_access_count == 2
+    assert service.metrics["blocks_behind"] == 0
+    assert service.metrics["last_synced_block"] == 100
+
+
 def test_get_last_block_reads_redis_first():
     redis_client = MagicMock()
     redis_client.get.return_value = "500"
