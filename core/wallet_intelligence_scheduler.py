@@ -172,6 +172,19 @@ def _ingest_rows(
                         if market_id
                         else MarketResolution(resolved_outcome=None, market_end_time=None)
                     )
+                    if market_id:
+                        # Not existing.market_id or market_id -- unlike the
+                        # other fields below, existing.market_id is already
+                        # truthy here (the live monitor has no tokenId ->
+                        # condition_id resolver, so it stores the raw
+                        # ERC1155 tokenId in this column as a placeholder).
+                        # Dune's market_id is the actual condition_id
+                        # market_insider_risk/build_signal2_score filter on
+                        # (OnchainTrade.market_id == condition_id) and what
+                        # MarketResolutionClient expects -- an `or` here
+                        # would keep the wrong tokenId forever since it's
+                        # never falsy. Must overwrite unconditionally.
+                        existing.market_id = market_id
                     existing.question = existing.question or row.get("question")
                     existing.outcome = existing.outcome or row.get("outcome")
                     existing.category = classify_category(row.get("event_market_name", ""))
