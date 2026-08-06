@@ -25,6 +25,8 @@ if str(root_path) not in sys.path:
 from dotenv import load_dotenv
 from web3 import Web3
 
+from blockchain.log_sanitizer import redact_urls
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -43,8 +45,8 @@ def _get_logs_safely(w3: Web3, filter_params: dict):
     except Exception as e:
         response = getattr(e, "response", None)
         if response is not None:
-            return None, f"HTTP {response.status_code} -- {response.text[:300]}"
-        return None, type(e).__name__
+            return None, f"HTTP {response.status_code} -- {redact_urls(response.text[:300])}"
+        return None, redact_urls(e)
 
 
 def main() -> int:
@@ -168,5 +170,5 @@ if __name__ == "__main__":
         # Last-resort guard: never let a raw traceback escape, since
         # requests/web3 exceptions often embed the full RPC URL (which may
         # contain an API key) in their default string representation.
-        logger.error(f"Smoke test failed with an unexpected {type(e).__name__} (details suppressed to avoid leaking the RPC URL)")
+        logger.error(f"Smoke test failed with an unexpected {type(e).__name__}: {redact_urls(e)}")
         sys.exit(1)

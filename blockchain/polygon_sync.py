@@ -20,6 +20,7 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 from blockchain.event_decoder import blockchain_id, decode_log, is_taker_side, OrderFilledEvent
+from blockchain.log_sanitizer import redact_urls
 from blockchain.polygon_contracts import TAKER_ADDRESSES, ORDER_FILLED_TOPIC0_V1, ORDER_FILLED_TOPIC0_V2
 from blockchain.wallet_profiler import increment_wallet_counters
 from models.orm import OnchainTrade, PolygonSyncState
@@ -87,11 +88,12 @@ class PolygonSyncService:
         try:
             current_block = self._w3.eth.block_number
         except Exception as e:
-            # Never interpolate self.rpc_url or the raw exception `e` here --
-            # RPC URLs commonly embed an API key (e.g. Alchemy's
-            # /v2/<key> path), and some HTTP client exceptions embed the
-            # full request URL in their default __str__.
-            logger.error(f"Polygon sync: could not reach RPC endpoint on startup ({type(e).__name__})")
+            # Never interpolate self.rpc_url or a raw exception here -- RPC
+            # URLs commonly embed an API key (e.g. Alchemy's /v2/<key>
+            # path), and some HTTP client exceptions embed the full request
+            # URL in their default __str__. redact_urls() strips those while
+            # keeping the rest of the message's diagnostic value.
+            logger.error(f"Polygon sync: could not reach RPC endpoint on startup: {redact_urls(e)}")
             return
 
         last_processed = self._get_last_block()
@@ -110,7 +112,7 @@ class PolygonSyncService:
                 current_block = self._w3.eth.block_number
             except Exception as e:
                 self.metrics["rpc_errors_total"] += 1
-                logger.error(f"Polygon sync: eth_blockNumber failed: {e}")
+                logger.error(f"Polygon sync: eth_blockNumber failed: {redact_urls(e)}")
                 self._stop_event.wait(self.poll_interval_seconds)
                 continue
 
@@ -153,7 +155,9 @@ class PolygonSyncService:
                     block_timestamps[block_number] = float(self._w3.eth.get_block(block_number)["timestamp"])
                 event = decode_log(raw_log, self._w3, block_timestamp=block_timestamps[block_number])
             except Exception as e:
-                logger.error(f"Polygon sync: failed to decode log: {e}")
+                # Wraps eth_getBlock (an RPC call) as well as pure decoding,
+                # so this is equally exposed to URL-bearing exceptions.
+                logger.error(f"Polygon sync: failed to decode log: {redact_urls(e)}")
                 continue
             if event is not None:
                 events.append(event)
@@ -219,9 +223,7 @@ class PolygonSyncService:
                 elif "rate limit" in message:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                 else:
-                    # Not `{e}` -- HTTPError's default __str__ embeds the
-                    # full request URL, which may contain an API key.
-                    logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {type(e).__name__}")
+                    logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {redact_urls(e)}")
                     time.sleep(RETRY_DELAY_SECONDS)
         logger.error(f"Polygon sync: eth_getLogs failed after {MAX_RETRIES} retries, skipping {from_block}-{to_block}")
         return [], False
@@ -268,7 +270,7 @@ class PolygonSyncService:
                 self.metrics["wallet_profiles_updated_total"] += 1
             except Exception as e:
                 db.rollback()
-                logger.error(f"Polygon sync: failed to process event tx={event.tx_hash}: {e}")
+                logger.error(f"Polygon sync: failed to process event tx={event.tx_hash}: {redact_urls(e)}")
         return processed
 
     def _get_last_block(self) -> Optional[int]:
@@ -277,14 +279,14 @@ class PolygonSyncService:
             if cached is not None:
                 return int(cached)
         except Exception as e:
-            logger.warning(f"Polygon sync: Redis read failed for last_block: {e}")
+            logger.warning(f"Polygon sync: Redis read failed for last_block: {redact_urls(e)}")
 
         db = self.db_session_factory()
         try:
             row = db.query(PolygonSyncState).order_by(PolygonSyncState.id.desc()).first()
             return row.last_block if row else None
         except Exception as e:
-            logger.warning(f"Polygon sync: Postgres read failed for last_block: {e}")
+            logger.warning(f"Polygon sync: Postgres read failed for last_block: {redact_urls(e)}")
             return None
         finally:
             db.close()
@@ -293,7 +295,7 @@ class PolygonSyncService:
         try:
             self.redis_client.set(LAST_BLOCK_REDIS_KEY, block_num)
         except Exception as e:
-            logger.warning(f"Polygon sync: Redis write failed for last_block: {e}")
+            logger.warning(f"Polygon sync: Redis write failed for last_block: {redact_urls(e)}")
 
         db = self.db_session_factory()
         try:
@@ -305,6 +307,6 @@ class PolygonSyncService:
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.warning(f"Polygon sync: Postgres write failed for last_block: {e}")
+            logger.warning(f"Polygon sync: Postgres write failed for last_block: {redact_urls(e)}")
         finally:
             db.close()

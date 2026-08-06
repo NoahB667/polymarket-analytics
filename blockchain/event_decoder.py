@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 
 from web3 import Web3
 
+from blockchain.log_sanitizer import redact_urls
 from blockchain.polygon_contracts import (
     ORDER_FILLED_ABI_V1,
     ORDER_FILLED_ABI_V2,
@@ -96,7 +97,12 @@ def decode_log(raw_log: Dict[str, Any], w3: Web3, block_timestamp: float) -> Opt
         decoded = contract.events.OrderFilled().process_log(raw_log)
         args = decoded["args"]
     except Exception as e:
-        logger.error(f"Failed to decode OrderFilled log at tx={raw_log.get('transactionHash')}: {e}")
+        # w3 is used here for ABI decoding only (no network I/O), so this
+        # shouldn't carry an RPC URL -- redacted anyway as defense in depth,
+        # since the cost is nil and a leaked API key is not recoverable.
+        logger.error(
+            f"Failed to decode OrderFilled log at tx={raw_log.get('transactionHash')}: {redact_urls(e)}"
+        )
         return None
 
     maker_amount = args["makerAmountFilled"]

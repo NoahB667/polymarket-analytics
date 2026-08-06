@@ -25,6 +25,8 @@ if str(root_path) not in sys.path:
 
 from dotenv import load_dotenv
 
+from blockchain.log_sanitizer import redact_urls
+
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
@@ -112,7 +114,7 @@ def main() -> int:
         last_block_redis = redis_client.get("polygon:last_block")
         logger.info(f"Redis polygon:last_block = {last_block_redis}")
     except Exception as e:
-        logger.warning(f"Could not read polygon:last_block from Redis: {type(e).__name__}")
+        logger.warning(f"Could not read polygon:last_block from Redis: {redact_urls(e)}")
 
     if service.metrics["events_processed_total"] == 0 and service.metrics["rpc_errors_total"] > 0:
         logger.error("No events processed and RPC errors occurred -- investigate before trusting this run.")
@@ -126,5 +128,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        logger.error(f"E2E test failed with an unexpected {type(e).__name__} (details suppressed to avoid leaking the RPC URL)")
+        logger.error(f"E2E test failed with an unexpected {type(e).__name__}: {redact_urls(e)}")
         sys.exit(1)
