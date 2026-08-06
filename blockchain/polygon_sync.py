@@ -251,7 +251,17 @@ class PolygonSyncService:
                     entry_price=event.implied_price,
                     block_timestamp=event.block_timestamp,
                 ))
-                db.commit()
+                # Deliberately NO commit here -- the OnchainTrade insert and
+                # the wallet counter bump must land in ONE transaction
+                # (increment_wallet_counters issues the commit covering
+                # both). Committing the trade first meant that if the
+                # counter bump then raised, the rollback could only undo the
+                # counter work: the trade row survived, so the dedup check
+                # above would `continue` past it on every future run and the
+                # counter bump would be lost permanently -- silently
+                # understating total_trades/long_shot_attempts and leaving
+                # score_stale unset, corrupting insider_score's inputs with
+                # no error trace after the fact.
                 increment_wallet_counters(db, event)
                 processed += 1
                 self.metrics["events_processed_total"] += 1

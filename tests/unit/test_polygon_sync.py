@@ -129,6 +129,50 @@ def test_process_batch_one_bad_event_does_not_abort_batch():
     assert db.query(OnchainTrade).filter_by(wallet_address="0xmaker").count() == 1
 
 
+def test_process_batch_rolls_back_trade_when_counter_bump_fails():
+    """Regression test: the OnchainTrade insert and the wallet counter bump
+    must be ONE transaction. Committing the trade first meant a failure in
+    increment_wallet_counters left the trade row committed while its
+    counter bump was rolled back -- and since the dedup check skips
+    already-present trades, that counter bump was lost permanently on
+    every future run, silently corrupting insider_score's inputs.
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+
+    with patch(
+        "blockchain.polygon_sync.increment_wallet_counters",
+        side_effect=Exception("counter bump failed"),
+    ):
+        processed = service._process_batch(db, [_event()])
+
+    assert processed == 0
+    # The trade must NOT survive on its own -- otherwise the dedup check
+    # would skip it forever and its counter bump would never happen.
+    assert db.query(OnchainTrade).count() == 0
+    assert db.query(WalletProfile).count() == 0
+
+
+def test_process_batch_commits_trade_and_counter_together():
+    """The happy path must still durably persist both halves."""
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+
+    service._process_batch(db, [_event()])
+    db.close()
+
+    # Re-open a fresh session to prove the write actually committed rather
+    # than merely being pending in the original session's transaction.
+    verify_db = session_factory()
+    assert verify_db.query(OnchainTrade).count() == 1
+    profile = verify_db.query(WalletProfile).filter_by(wallet_address="0xmaker").first()
+    assert profile is not None
+    assert profile.total_trades == 1
+    verify_db.close()
+
+
 def test_fetch_logs_chunks_large_ranges():
     w3 = MagicMock()
     w3.eth.get_logs.return_value = []
