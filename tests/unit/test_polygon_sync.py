@@ -145,7 +145,11 @@ def test_fetch_logs_chunks_large_ranges():
 
 def test_fetch_logs_halves_chunk_on_block_range_error():
     w3 = MagicMock()
-    w3.eth.get_logs.side_effect = [Exception("block range too large"), []]
+    w3.eth.get_logs.side_effect = [
+        Exception("block range too large"),  # 1-1000 requested, fails
+        [],  # shrunk to 1-500, succeeds
+        [],  # next chunk 501-1000, succeeds
+    ]
     service = _service()
     service._w3 = w3
     service.max_blocks_per_query = 1000
@@ -154,7 +158,32 @@ def test_fetch_logs_halves_chunk_on_block_range_error():
 
     assert service.max_blocks_per_query == 500
     assert logs == []
-    assert last_successful_block == 1000  # eventually covered despite the retry
+    assert last_successful_block == 1000  # both chunks actually succeeded, so fully covered
+
+
+def test_fetch_logs_last_successful_block_reflects_actual_shrunk_coverage():
+    """Regression test: _fetch_chunk_with_retry can shrink its range
+    mid-retry and succeed on a narrower range than _fetch_logs originally
+    requested (chunk_end, computed before the call from the pre-shrink
+    max_blocks_per_query). last_successful_block must reflect the ACTUAL
+    covered range -- trusting the stale pre-shrink chunk_end silently
+    skips the blocks in between forever, contradicting the no-gap
+    guarantee. Uses a to_block far past the shrunk range so the outer
+    to_block clamp can't coincidentally hide the bug.
+    """
+    w3 = MagicMock()
+    w3.eth.get_logs.side_effect = [
+        Exception("block range too large"),  # 1-20 requested (max_blocks_per_query=20), fails
+        [],  # shrunk to 1-10 (halved to 10), succeeds
+    ]
+    service = _service()
+    service._w3 = w3
+    service.max_blocks_per_query = 20
+
+    with patch("blockchain.polygon_sync.time.sleep"):
+        logs, last_successful_block = service._fetch_logs(from_block=1, to_block=100)
+
+    assert last_successful_block == 10  # not 20 -- only blocks 1-10 were actually fetched
 
 
 def test_fetch_logs_stops_at_first_persistently_failing_chunk():

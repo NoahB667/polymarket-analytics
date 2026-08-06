@@ -182,8 +182,18 @@ class PolygonSyncService:
             if not success:
                 break
             all_logs.extend(logs)
-            last_successful_block = chunk_end
-            chunk_start = chunk_end + 1
+            # Not chunk_end -- _fetch_chunk_with_retry can shrink
+            # self.max_blocks_per_query (and its own toBlock) mid-retry and
+            # succeed on a narrower range than chunk_end originally
+            # requested. self.max_blocks_per_query at this point always
+            # reflects whatever range the successful attempt actually
+            # covered, so recompute from chunk_start with the current
+            # (possibly now-smaller) value rather than trusting the
+            # pre-call chunk_end -- otherwise blocks between the actual
+            # covered range and chunk_end are silently skipped forever.
+            covered_end = min(chunk_start + self.max_blocks_per_query - 1, to_block)
+            last_successful_block = covered_end
+            chunk_start = covered_end + 1
         return all_logs, last_successful_block
 
     def _fetch_chunk_with_retry(self, from_block: int, to_block: int) -> "tuple[List[Any], bool]":
