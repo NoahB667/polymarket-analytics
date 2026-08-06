@@ -6,20 +6,21 @@ import json
 import time
 from contextlib import contextmanager, asynccontextmanager
 from queue import Queue, Full
-from typing import Dict
+from typing import Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from telegram import Bot
 from dotenv import load_dotenv
 from redis_config import r
-from db import engine, SessionLocal, get_db_session, logger
+from db import engine, SessionLocal, get_db_session, logger, ensure_additive_columns
 
 from models.orm import Base, PriceImpactCheck, Subscription, Trade
 from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
 from core.global_ws_manager import GlobalWebSocketManager
 from core.auto_discovery import run_scheduler_loop
-from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop
+from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop, run_score_recalculation_loop
+from blockchain.polygon_sync import PolygonSyncService
 
 
 load_dotenv()
@@ -38,6 +39,9 @@ _evaluator_thread_started = False
 _global_ws_started = False
 _auto_discovery_started = False
 _wallet_intelligence_started = False
+_polygon_sync_started = False
+_score_recalculation_started = False
+polygon_sync_service: Optional[PolygonSyncService] = None
 
 def db_writer_worker():
     """Drains allocation queue cleanly without locking up hot path API requests."""
@@ -329,6 +333,7 @@ def ensure_auto_market_stream(slug: str, token_ids: list) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_additive_columns()
     
     global _writer_thread_started, _pubsub_thread_started, _evaluator_thread_started
     
@@ -385,6 +390,33 @@ async def lifespan(app: FastAPI):
         ).start()
         _wallet_intelligence_started = True
 
+    # 7. Start the Polygon live monitor thread. No-op if POLYGON_RPC_URL is
+    # unset -- the rest of the app must work without it (reference/polygon_live_monitor.md).
+    global _polygon_sync_started, polygon_sync_service
+    polygon_rpc_url = os.getenv("POLYGON_RPC_URL")
+    if not _polygon_sync_started:
+        if polygon_rpc_url:
+            polygon_sync_service = PolygonSyncService(
+                rpc_url=polygon_rpc_url,
+                db_session_factory=SessionLocal,
+                redis_client=r,
+            )
+            polygon_sync_service.start()
+        else:
+            logger.warning("POLYGON_RPC_URL not set, skipping Polygon live monitor")
+        _polygon_sync_started = True
+
+    # 8. Start the hourly insider_score recalculation thread for wallets
+    # flagged stale by the Polygon live monitor.
+    global _score_recalculation_started
+    if not _score_recalculation_started:
+        threading.Thread(
+            target=run_score_recalculation_loop,
+            kwargs={"redis_client": r},
+            daemon=True,
+        ).start()
+        _score_recalculation_started = True
+
     # Sync state tables non-blockingly on startup
     db = SessionLocal()
     try:
@@ -413,6 +445,8 @@ async def lifespan(app: FastAPI):
             pass
     market_streams.clear()
     global_ws_manager.close()
+    if polygon_sync_service is not None:
+        polygon_sync_service.stop()
 
 app = FastAPI(lifespan=lifespan)
 

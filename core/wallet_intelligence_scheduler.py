@@ -24,10 +24,10 @@ from typing import Any, List, Optional
 
 from blockchain.dune_client import DuneClient
 from blockchain.market_resolution_client import MarketResolution, MarketResolutionClient
-from blockchain.wallet_profiler import profile_all_wallets
+from blockchain.wallet_profiler import profile_all_wallets, profile_wallet
 from signal_core.wallet_intelligence import classify_category
 from db import SessionLocal
-from models.orm import AutoSubscription, OnchainTrade
+from models.orm import AutoSubscription, OnchainTrade, WalletProfile
 
 logger = logging.getLogger("polymarket.core.wallet_intelligence_scheduler")
 
@@ -44,6 +44,8 @@ WALLET_INTELLIGENCE_ROW_LIMIT = int(os.getenv("WALLET_INTELLIGENCE_ROW_LIMIT", "
 CLOB_ACTION_VALUE = "CLOB trade"
 
 CONDITION_ID_PATTERN = re.compile(r"^0x[0-9a-fA-F]+$")
+
+SCORE_RECALCULATION_INTERVAL_HOURS = float(os.getenv("SCORE_RECALCULATION_INTERVAL_HOURS", "1"))
 
 
 def get_active_condition_ids(session_factory=SessionLocal) -> List[str]:
@@ -155,7 +157,40 @@ def _ingest_rows(
     for row in dune.fetch_results_paginated(execution_id):
         blockchain_id = row.get("blockchain_id")
         try:
-            if db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first():
+            existing = db.query(OnchainTrade).filter_by(blockchain_id=blockchain_id).first()
+            if existing is not None:
+                # Step 9's live monitor may have inserted this row first with
+                # category/question/resolved_outcome left NULL (it has no
+                # tokenId -> market metadata resolver) -- backfill those
+                # fields now rather than permanently skipping them. A row
+                # that already has a category came from a prior Dune
+                # ingestion and is left untouched.
+                if existing.category is None:
+                    market_id = row.get("market_id")
+                    resolution = (
+                        resolution_client.resolve_market(market_id)
+                        if market_id
+                        else MarketResolution(resolved_outcome=None, market_end_time=None)
+                    )
+                    if market_id:
+                        # Not existing.market_id or market_id -- unlike the
+                        # other fields below, existing.market_id is already
+                        # truthy here (the live monitor has no tokenId ->
+                        # condition_id resolver, so it stores the raw
+                        # ERC1155 tokenId in this column as a placeholder).
+                        # Dune's market_id is the actual condition_id
+                        # market_insider_risk/build_signal2_score filter on
+                        # (OnchainTrade.market_id == condition_id) and what
+                        # MarketResolutionClient expects -- an `or` here
+                        # would keep the wrong tokenId forever since it's
+                        # never falsy. Must overwrite unconditionally.
+                        existing.market_id = market_id
+                    existing.question = existing.question or row.get("question")
+                    existing.outcome = existing.outcome or row.get("outcome")
+                    existing.category = classify_category(row.get("event_market_name", ""))
+                    existing.resolved_outcome = existing.resolved_outcome or resolution.resolved_outcome
+                    existing.market_end_time = existing.market_end_time or resolution.market_end_time
+                    db.commit()
                 continue
 
             market_id = row.get("market_id")
@@ -277,3 +312,58 @@ def run_wallet_intelligence_loop(
         except Exception as e:
             logger.error(f"Wallet intelligence: cycle failed, will retry next interval: {e}")
         stop_event.wait(WALLET_INTELLIGENCE_INTERVAL_HOURS * 3600)
+
+
+def run_score_recalculation_cycle(redis_client: Any = None, session_factory=SessionLocal) -> dict:
+    """Recomputes insider_score for every wallet flagged score_stale by
+    PolygonSyncService's hot-path counter increments (Step 9). Keeps the
+    live sync loop cheap by deferring the expensive full recompute here.
+
+    Best-effort per wallet: a failure is logged and skipped, not fatal to
+    the cycle.
+
+    Returns:
+        {"stale_wallets": int, "recalculated": int}
+    """
+    summary = {"stale_wallets": 0, "recalculated": 0}
+    db = session_factory()
+    try:
+        stale_addresses = [
+            row[0] for row in db.query(WalletProfile.wallet_address)
+            .filter(WalletProfile.score_stale.is_(True)).all()
+        ]
+        summary["stale_wallets"] = len(stale_addresses)
+        for address in stale_addresses:
+            try:
+                profile_wallet(db, address, redis_client)
+                stale_row = db.query(WalletProfile).filter_by(wallet_address=address).first()
+                if stale_row is not None:
+                    stale_row.score_stale = False
+                    db.commit()
+                summary["recalculated"] += 1
+            except Exception as e:
+                db.rollback()
+                logger.error(f"Score recalculation: skipping {address} after failure: {e}")
+    finally:
+        db.close()
+
+    logger.info(f"Score recalculation cycle complete: {summary['recalculated']}/{summary['stale_wallets']} wallets")
+    return summary
+
+
+def run_score_recalculation_loop(
+    redis_client: Any = None,
+    session_factory=SessionLocal,
+    stop_event: Optional[threading.Event] = None,
+) -> None:
+    """Runs run_score_recalculation_cycle hourly, forever. Mirrors
+    run_wallet_intelligence_loop's shape -- single daemon thread from
+    app.py's lifespan, never raises out of the loop.
+    """
+    stop_event = stop_event or threading.Event()
+    while not stop_event.is_set():
+        try:
+            run_score_recalculation_cycle(redis_client=redis_client, session_factory=session_factory)
+        except Exception as e:
+            logger.error(f"Score recalculation: cycle failed, will retry next interval: {e}")
+        stop_event.wait(SCORE_RECALCULATION_INTERVAL_HOURS * 3600)

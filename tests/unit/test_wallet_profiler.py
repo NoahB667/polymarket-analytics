@@ -8,11 +8,18 @@ root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from db import Base
+from models.orm import WalletProfile as WalletProfileORM
+
+from blockchain.event_decoder import OrderFilledEvent
 from blockchain.wallet_profiler import (
     profile_wallet,
     profile_all_wallets,
     market_insider_risk,
     build_signal2_score,
+    increment_wallet_counters,
 )
 
 
@@ -280,3 +287,51 @@ def test_build_signal2_score_survives_redis_write_failure():
 
     assert signal.market_id == "mkt-1"
     assert signal.sample_size == 3
+
+
+def _order_filled_event(implied_price=0.5, maker="0xabc"):
+    return OrderFilledEvent(
+        order_hash="0x" + "1" * 64, maker=maker, taker="0x" + "2" * 40,
+        token_id="4242", usd_amount=5.0, shares=10.0, implied_price=implied_price,
+        maker_side="BUY", fee_usd=0.0, contract_version="v2",
+        block_number=100, block_timestamp=time.time(), tx_hash="0x" + "3" * 64, log_index=0,
+    )
+
+
+def _sqlite_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine)()
+
+
+def test_increment_wallet_counters_creates_profile_for_new_wallet():
+    db = _sqlite_session()
+    increment_wallet_counters(db, _order_filled_event(maker="0xnew"))
+    row = db.query(WalletProfileORM).filter_by(wallet_address="0xnew").first()
+    assert row is not None
+    assert row.total_trades == 1
+    assert row.score_stale is True
+
+
+def test_increment_wallet_counters_bumps_existing_profile():
+    db = _sqlite_session()
+    db.add(WalletProfileORM(wallet_address="0xexisting", total_trades=3, last_updated=time.time()))
+    db.commit()
+    increment_wallet_counters(db, _order_filled_event(maker="0xexisting"))
+    row = db.query(WalletProfileORM).filter_by(wallet_address="0xexisting").first()
+    assert row.total_trades == 4
+    assert row.score_stale is True
+
+
+def test_increment_wallet_counters_flags_longshot():
+    db = _sqlite_session()
+    increment_wallet_counters(db, _order_filled_event(implied_price=0.10, maker="0xlongshot"))
+    row = db.query(WalletProfileORM).filter_by(wallet_address="0xlongshot").first()
+    assert row.long_shot_attempts == 1
+
+
+def test_increment_wallet_counters_does_not_flag_non_longshot():
+    db = _sqlite_session()
+    increment_wallet_counters(db, _order_filled_event(implied_price=0.5, maker="0xregular"))
+    row = db.query(WalletProfileORM).filter_by(wallet_address="0xregular").first()
+    assert row.long_shot_attempts == 0

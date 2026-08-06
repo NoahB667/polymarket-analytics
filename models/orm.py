@@ -127,6 +127,10 @@ class WalletProfile(Base):
     )  # Final rating (0.0 to 1.0)
     last_updated = Column(Float, nullable=False)
 
+    score_stale = Column(
+        Boolean, default=False, nullable=False, index=True
+    )  # Set by polygon_sync on new trades; cleared by hourly score recalculation
+
 
 class AutoSubscription(Base):
     """Tracks markets subscribed to automatically by the discovery scheduler (Step 8.5)."""
@@ -158,3 +162,18 @@ class AutoSubscription(Base):
         Index("idx_auto_sub_tier", "tier"),
         Index("idx_auto_sub_score", "market_score"),
     )
+
+
+class PolygonSyncState(Base):
+    """Tracks the last Polygon block processed by PolygonSyncService.
+
+    Backup for the Redis `polygon:last_block` key -- read on startup only
+    if Redis is empty (e.g. after a Redis flush/restart).
+    """
+
+    __tablename__ = "polygon_sync_state"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    last_block = Column(Integer, nullable=False)
+    last_updated = Column(Float, nullable=False)
+    events_processed = Column(Integer, default=0, nullable=False)

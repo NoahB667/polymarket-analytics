@@ -11,7 +11,7 @@ if str(root_path) not in sys.path:
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from db import Base
-from models.orm import AutoSubscription, OnchainTrade
+from models.orm import AutoSubscription, OnchainTrade, WalletProfile
 
 import core.wallet_intelligence_scheduler as wis
 
@@ -185,6 +185,147 @@ def test_run_wallet_intelligence_loop_disabled_does_nothing():
         wis.run_wallet_intelligence_loop()
 
     mock_cycle.assert_not_called()
+
+
+def test_ingest_rows_enriches_existing_sparse_row():
+    """A row the Step 9 live monitor inserted first (category=None) must get
+    enriched, not permanently skipped, when Dune later re-sees the same
+    blockchain_id. Uses realistically DIFFERENT market_id formats for the
+    pre-existing row (a raw ERC1155 tokenId, what polygon_sync.py actually
+    writes -- it has no tokenId -> condition_id resolver) vs. the Dune row
+    (a condition_id, what Dune's query actually selects) -- the two
+    insertion paths never write the same format into this column, so a
+    test using the same value for both would hide the mismatch entirely.
+    """
+    live_monitor_token_id = "79345147964173535791606686635318275619935368037458586552522466442279747941666"
+    dune_condition_id = "0xmkt"
+
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(OnchainTrade(
+        blockchain_id="AAAA-0", wallet_address="0xabc", market_id=live_monitor_token_id,
+        question=None, outcome=None, category=None,
+        usd_volume=5.0, entry_price=0.5, block_timestamp=time.time(),
+    ))
+    db.commit()
+    db.close()
+
+    fake_dune = MagicMock()
+    fake_dune.fetch_results_paginated.return_value = iter([
+        {
+            "blockchain_id": "AAAA-0", "wallet_address": "0xabc", "market_id": dune_condition_id,
+            "event_market_name": "Fed rate cut", "question": "Will the Fed cut rates?",
+            "outcome": "Yes", "usd_volume": 5.0, "entry_price": 0.5,
+            "block_timestamp": time.time(),
+        },
+    ])
+
+    fake_resolution_client = MagicMock()
+    fake_resolution_client.resolve_market.return_value = wis.MarketResolution(
+        resolved_outcome="Yes", market_end_time=1999999999.0
+    )
+
+    db = session_factory()
+    ingested = wis._ingest_rows(db, fake_dune, "exec-1", fake_resolution_client)
+    db.close()
+
+    assert ingested == 0  # not a new row -- enrichment doesn't count as "ingested"
+
+    db = session_factory()
+    row = db.query(OnchainTrade).filter_by(blockchain_id="AAAA-0").first()
+    assert row.category is not None
+    assert row.question == "Will the Fed cut rates?"
+    assert row.outcome == "Yes"
+    assert row.resolved_outcome == "Yes"
+    # Regression: market_id must be backfilled to Dune's condition_id, not
+    # left as the live monitor's tokenId placeholder. Downstream,
+    # market_insider_risk/build_signal2_score filter
+    # OnchainTrade.market_id == <condition_id>, and MarketResolutionClient
+    # expects a condition_id -- a row stuck with a tokenId here would be
+    # permanently invisible to per-market Signal 2 aggregation.
+    assert row.market_id == dune_condition_id
+    fake_resolution_client.resolve_market.assert_called_once_with(dune_condition_id)
+    assert row.market_end_time == 1999999999.0
+    db.close()
+
+
+def test_ingest_rows_does_not_re_enrich_already_categorized_row():
+    """A row that already has a category (came from a prior Dune ingestion,
+    not the live monitor) must not be touched again -- category is set once.
+    """
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(OnchainTrade(
+        blockchain_id="BBBB-0", wallet_address="0xabc", market_id="0xmkt",
+        question="Original question", outcome="No", category="fed",
+        usd_volume=5.0, entry_price=0.5, block_timestamp=time.time(),
+    ))
+    db.commit()
+    db.close()
+
+    fake_dune = MagicMock()
+    fake_dune.fetch_results_paginated.return_value = iter([
+        {
+            "blockchain_id": "BBBB-0", "wallet_address": "0xabc", "market_id": "0xmkt",
+            "event_market_name": "Different event", "question": "A different question?",
+            "outcome": "Yes", "usd_volume": 5.0, "entry_price": 0.5,
+            "block_timestamp": time.time(),
+        },
+    ])
+    fake_resolution_client = MagicMock()
+
+    db = session_factory()
+    wis._ingest_rows(db, fake_dune, "exec-1", fake_resolution_client)
+    db.close()
+
+    fake_resolution_client.resolve_market.assert_not_called()
+    db = session_factory()
+    row = db.query(OnchainTrade).filter_by(blockchain_id="BBBB-0").first()
+    assert row.question == "Original question"
+    assert row.category == "fed"
+    db.close()
+
+
+def test_run_score_recalculation_cycle_clears_stale_flag():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(WalletProfile(wallet_address="0xstale", total_trades=1, score_stale=True, last_updated=time.time()))
+    db.add(WalletProfile(wallet_address="0xfresh", total_trades=1, score_stale=False, last_updated=time.time()))
+    db.commit()
+    db.close()
+
+    summary = wis.run_score_recalculation_cycle(redis_client=None, session_factory=session_factory)
+
+    assert summary["stale_wallets"] == 1
+    assert summary["recalculated"] == 1
+    db = session_factory()
+    row = db.query(WalletProfile).filter_by(wallet_address="0xstale").first()
+    assert row.score_stale is False
+    db.close()
+
+
+def test_run_score_recalculation_cycle_survives_per_wallet_failure():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(WalletProfile(wallet_address="0xbad", total_trades=1, score_stale=True, last_updated=time.time()))
+    db.commit()
+    db.close()
+
+    with patch.object(wis, "profile_wallet", side_effect=Exception("simulated failure")):
+        summary = wis.run_score_recalculation_cycle(redis_client=None, session_factory=session_factory)
+
+    assert summary["stale_wallets"] == 1
+    assert summary["recalculated"] == 0
+    db = session_factory()
+    row = db.query(WalletProfile).filter_by(wallet_address="0xbad").first()
+    assert row.score_stale is True  # still stale -- will retry next cycle
+    db.close()
+
+
+def test_run_score_recalculation_cycle_no_stale_wallets():
+    session_factory = _sqlite_session_factory()
+    summary = wis.run_score_recalculation_cycle(redis_client=None, session_factory=session_factory)
+    assert summary == {"stale_wallets": 0, "recalculated": 0}
 
 
 def test_run_wallet_intelligence_loop_runs_cycle_when_enabled():

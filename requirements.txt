@@ -11,3 +11,4 @@ pybind11>=2.11.0
 pytest>=7.4.0
 httpx>=0.28.1
 orjson>=3.10.0
+web3>=6.0.0
