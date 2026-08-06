@@ -203,6 +203,11 @@ def test_fetch_logs_halves_chunk_on_block_range_error():
     assert service.max_blocks_per_query == 500
     assert logs == []
     assert last_successful_block == 1000  # both chunks actually succeeded, so fully covered
+    # 1-1000 fails, 1-500 (shrunk) succeeds, then a separate 501-1000 chunk
+    # succeeds -- 3 calls, not 2. Asserted explicitly so a future edit that
+    # shrinks side_effect back to 2 entries fails loudly here instead of
+    # masking a real bug behind get_logs' MagicMock StopIteration.
+    assert w3.eth.get_logs.call_count == 3
 
 
 def test_fetch_logs_last_successful_block_reflects_actual_shrunk_coverage():
