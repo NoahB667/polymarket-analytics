@@ -101,6 +101,47 @@ def test_sync_loop_reuses_current_block_for_blocks_behind_metric():
     assert service.metrics["last_synced_block"] == 100
 
 
+def test_sync_loop_caps_catchup_to_max_catchup_blocks_per_cycle():
+    """Regression: when the gap exceeds max_catchup_blocks, _fetch_logs was
+    called with to_block=current_block (the raw, unbounded chain tip) every
+    single iteration -- max_catchup_blocks was only ever used to decide
+    whether to log the "large gap detected" warning, never to actually cap
+    per-cycle work. On a real 200k+ block backlog with a 2-second poll
+    interval, this meant every cycle attempted hundreds of sequential
+    eth_getLogs calls in one unbroken burst, pinning the sync thread's CPU
+    continuously since new blocks kept arriving faster than one thread
+    could plow through the backlog sequentially -- confirmed live. Each
+    cycle must instead do bounded work: to_block capped at
+    last_processed + max_catchup_blocks.
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    service.poll_interval_seconds = 0
+    service.max_catchup_blocks = 100
+
+    fake_eth = _FakeEth(block_number_value=1_000_000)
+    service._w3.eth = fake_eth
+
+    with patch.object(service, "_get_last_block", return_value=0), \
+         patch.object(service, "_fetch_logs", return_value=([], 100)) as mock_fetch_logs, \
+         patch.object(service, "_save_last_block"):
+
+        real_wait = service._stop_event.wait
+
+        def _stop_after_one_iteration(timeout):
+            result = real_wait(timeout)
+            service._stop_event.set()
+            return result
+
+        service._stop_event.wait = _stop_after_one_iteration
+
+        service._sync_loop()
+
+    # Capped to last_processed(0) + max_catchup_blocks(100) = 100, not the
+    # raw current_block of 1,000,000.
+    mock_fetch_logs.assert_called_once_with(1, 100)
+
+
 def test_get_last_block_reads_redis_first():
     redis_client = MagicMock()
     redis_client.get.return_value = "500"

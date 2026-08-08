@@ -117,7 +117,19 @@ class PolygonSyncService:
                 continue
 
             if current_block > last_processed:
-                logs, last_successful_block = self._fetch_logs(last_processed + 1, current_block)
+                # Capped at max_catchup_blocks per cycle -- previously this
+                # passed the raw current_block (the full, unbounded chain
+                # tip) every iteration. On a large backlog with a short
+                # poll_interval_seconds, that meant every cycle attempted
+                # hundreds of sequential eth_getLogs calls in one unbroken
+                # burst, pinning the sync thread's CPU continuously since
+                # new blocks kept arriving faster than one thread could
+                # plow through the backlog sequentially. Bounding to_block
+                # here makes each cycle do fixed, predictable work, so the
+                # thread actually idles for poll_interval_seconds between
+                # cycles while still making steady forward progress.
+                to_block = min(current_block, last_processed + self.max_catchup_blocks)
+                logs, last_successful_block = self._fetch_logs(last_processed + 1, to_block)
                 db = self.db_session_factory()
                 try:
                     events_processed = self._process_batch(db, self._decode_logs(logs))
