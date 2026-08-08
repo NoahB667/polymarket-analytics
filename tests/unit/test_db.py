@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +10,22 @@ if str(root_path) not in sys.path:
 from sqlalchemy import create_engine, text, inspect
 
 import db
+
+
+def test_httpx_and_httpcore_logging_suppressed_to_prevent_secret_leaks():
+    """Regression: httpx logs full request URLs at INFO level, and
+    Telegram's Bot API embeds the bot token directly in the URL path
+    (https://api.telegram.org/bot<TOKEN>/sendMessage), not a header --
+    confirmed live that INFO-level httpx logging leaked a real BOT_TOKEN
+    into container logs on every Telegram API call. Must be suppressed at
+    import time (module-level, in db.py, imported early by every entry
+    point) so it holds regardless of what any other module's
+    logging.basicConfig() call later configures for the root logger --
+    Logger.setLevel() on a specific logger always wins over an inherited
+    root level, independent of call order.
+    """
+    assert logging.getLogger("httpx").level == logging.WARNING
+    assert logging.getLogger("httpcore").level == logging.WARNING
 
 
 def test_ensure_additive_columns_adds_missing_column():

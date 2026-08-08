@@ -9,6 +9,19 @@ load_dotenv()
 
 logger = logging.getLogger("polymarket.api")
 
+# httpx (the Telegram bot client's HTTP library) logs full request URLs at
+# INFO level, and Telegram's Bot API embeds the bot token directly in the
+# URL path (https://api.telegram.org/bot<TOKEN>/sendMessage) rather than a
+# header -- confirmed live that this leaked a real BOT_TOKEN into container
+# logs on every Telegram API call. Set explicitly here (not via
+# logging.basicConfig) so it holds regardless of import order or what any
+# other module's basicConfig call configures for the root logger --
+# Logger.setLevel() on a specific logger always wins over an inherited root
+# level. db.py is imported early by every entry point (app.py, scripts),
+# so this takes effect before any Telegram/HTTP call can happen.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     logger.critical("DATABASE_URL environment variable is not set!")
