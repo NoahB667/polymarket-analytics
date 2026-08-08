@@ -361,6 +361,69 @@ def test_run_discovery_cycle_subscribes_new_qualifying_market():
     db.close()
 
 
+def test_run_discovery_cycle_reactivates_previously_resolved_slug_instead_of_duplicate_insert():
+    """Regression: a market marked 'resolved' (e.g. it missed selection
+    twice transiently, per RESOLVED_MISS_THRESHOLD) that reappears as a
+    qualifying Gamma candidate must be reactivated in place, not
+    re-INSERTed. A fresh INSERT collides with the slug's unique constraint
+    on commit, which rolls back the ENTIRE cycle's transaction -- silently
+    discarding every other legitimate update (other new markets,
+    last_cycle_at/consecutive_misses refreshes for already-active markets)
+    made in that same cycle, even though the cycle logs as "complete".
+    """
+    original_subscribed_at = _time.time() - 100000
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="us-china-tariffs-q3-2026", question="stale", category="economics",
+        market_score=0.5, tier=2, volume_24h=100.0, days_remaining=1.0,
+        token_ids=["stale_tok"], subscribed_at=original_subscribed_at,
+        last_seen_active=original_subscribed_at, last_cycle_at=original_subscribed_at,
+        status="resolved", consecutive_misses=2,
+    ))
+    # A second, genuinely-active market whose bookkeeping update must
+    # survive the cycle -- this is what proves the whole-cycle rollback is
+    # actually fixed, not just the collision itself.
+    db.add(AutoSubscription(
+        slug="already-active-market", question="Q", category="c",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_x"], subscribed_at=_time.time() - 1000,
+        last_seen_active=_time.time() - 1000, last_cycle_at=_time.time() - 1000,
+        status="active", consecutive_misses=0,
+    ))
+    db.commit()
+    db.close()
+
+    subscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[dict(_TARIFF_MARKET)]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append((slug, tids)),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert subscribed == [("us-china-tariffs-q3-2026", ["tok_1", "tok_2"])]
+
+    db = session_factory()
+    reactivated = db.query(AutoSubscription).filter_by(slug="us-china-tariffs-q3-2026").all()
+    assert len(reactivated) == 1  # never a duplicate row
+    row = reactivated[0]
+    assert row.status == "active"
+    assert row.token_ids == ["tok_1", "tok_2"]
+    assert row.consecutive_misses == 0
+    assert row.subscribed_at == original_subscribed_at  # first-discovery time preserved, not reset
+
+    # The unrelated already-active market wasn't in this cycle's candidates
+    # (fetch_candidate_markets only returned the tariff market), so it
+    # should have picked up a consecutive_misses bump -- proving this
+    # cycle's OTHER updates weren't discarded by the earlier collision.
+    other = db.query(AutoSubscription).filter_by(slug="already-active-market").first()
+    assert other.consecutive_misses == 1
+    db.close()
+
+
 def test_run_discovery_cycle_marks_resolved_after_two_consecutive_misses():
     session_factory = _sqlite_session_factory()
     db = session_factory()
