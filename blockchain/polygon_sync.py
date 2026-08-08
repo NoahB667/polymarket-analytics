@@ -23,7 +23,7 @@ from blockchain.event_decoder import blockchain_id, decode_log, is_taker_side, O
 from blockchain.log_sanitizer import redact_urls
 from blockchain.polygon_contracts import TAKER_ADDRESSES, ORDER_FILLED_TOPIC0_V1, ORDER_FILLED_TOPIC0_V2
 from blockchain.wallet_profiler import increment_wallet_counters
-from models.orm import OnchainTrade, PolygonSyncState
+from models.orm import AutoSubscription, OnchainTrade, PolygonSyncState
 
 logger = logging.getLogger("polymarket.blockchain.polygon_sync")
 
@@ -290,9 +290,18 @@ class PolygonSyncService:
         Returns:
             Count of events successfully processed.
         """
+        tracked_token_ids = self._get_tracked_token_ids(db)
         processed = 0
         for event in events:
             if not is_taker_side(event):
+                self.metrics["events_skipped_total"] += 1
+                continue
+            if tracked_token_ids is not None and event.token_id not in tracked_token_ids:
+                # Matches the scoping the Dune-based Signal 2 pipeline
+                # already applies (WHERE condition_id IN (tracked)) --
+                # without this, every on-chain trade for every Polymarket
+                # market got persisted and wallet-profiled regardless of
+                # whether anything currently tracks it.
                 self.metrics["events_skipped_total"] += 1
                 continue
             bid = blockchain_id(event)
@@ -326,6 +335,32 @@ class PolygonSyncService:
                 db.rollback()
                 logger.error(f"Polygon sync: failed to process event tx={event.tx_hash}: {redact_urls(e)}")
         return processed
+
+    def _get_tracked_token_ids(self, db: Any) -> Optional[set]:
+        """CLOB token ids for every currently active auto-tracked market.
+
+        Returns:
+            The set of tracked token ids, or None if the lookup itself
+            failed -- callers must treat None as "no filter, process
+            everything" rather than skip every event. Once _fetch_logs
+            marks a block range as successfully covered, that range is
+            never re-fetched, so silently dropping trades here due to a
+            transient DB hiccup would be a permanent, unrecoverable loss
+            -- worse than occasionally processing an untracked market's
+            trade during that same rare hiccup.
+        """
+        try:
+            tracked: set = set()
+            rows = db.query(AutoSubscription.token_ids).filter_by(status="active").all()
+            for (token_ids,) in rows:
+                if token_ids:
+                    tracked.update(token_ids)
+            return tracked
+        except Exception as e:
+            logger.warning(
+                f"Polygon sync: failed to load tracked token_ids, processing unfiltered this batch: {redact_urls(e)}"
+            )
+            return None
 
     def _get_last_block(self) -> Optional[int]:
         try:

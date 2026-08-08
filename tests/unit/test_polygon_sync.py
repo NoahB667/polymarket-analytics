@@ -10,7 +10,7 @@ if str(root_path) not in sys.path:
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from db import Base
-from models.orm import OnchainTrade, PolygonSyncState, WalletProfile
+from models.orm import AutoSubscription, OnchainTrade, PolygonSyncState, WalletProfile
 
 from blockchain.polygon_sync import PolygonSyncService
 from blockchain.event_decoder import OrderFilledEvent
@@ -29,9 +29,21 @@ def _service(**overrides):
     return PolygonSyncService(**kwargs)
 
 
-def _event(tx="0x" + "3" * 64, log_index=0, maker="0xmaker", taker=CTF_EXCHANGE_V2):
+def _seed_tracked_market(db, token_id="4242"):
+    """Seeds an active AutoSubscription tracking the given token_id, so
+    _process_batch's tracked-market filter doesn't exclude test events
+    whose actual point is unrelated (dedup, error handling, commit
+    behavior, metrics)."""
+    db.add(AutoSubscription(
+        slug="tracked-market", question="Q", category="c", market_score=0.9, tier=1,
+        subscribed_at=time.time(), status="active", token_ids=[token_id],
+    ))
+    db.commit()
+
+
+def _event(tx="0x" + "3" * 64, log_index=0, maker="0xmaker", taker=CTF_EXCHANGE_V2, token_id="4242"):
     return OrderFilledEvent(
-        order_hash="0x" + "1" * 64, maker=maker, taker=taker, token_id="4242",
+        order_hash="0x" + "1" * 64, maker=maker, taker=taker, token_id=token_id,
         usd_amount=5.0, shares=10.0, implied_price=0.5, maker_side="BUY", fee_usd=0.0,
         contract_version="v2", block_number=100, block_timestamp=time.time(),
         tx_hash=tx, log_index=log_index,
@@ -241,6 +253,7 @@ def test_process_batch_inserts_new_onchain_trade_and_increments_wallet():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
+    _seed_tracked_market(db)
 
     service._process_batch(db, [_event()])
 
@@ -261,10 +274,75 @@ def test_process_batch_skips_non_taker_side_events():
     assert db.query(OnchainTrade).count() == 0
 
 
+def test_process_batch_skips_events_for_untracked_markets():
+    """The Dune-based Signal 2 pipeline already scopes itself to only
+    currently auto-tracked markets (WHERE condition_id IN (tracked)) --
+    the Polygon live monitor had no equivalent filter and persisted every
+    on-chain trade for every Polymarket market regardless of relevance,
+    wasting DB writes and wallet-profiling compute on markets nothing
+    tracks. token_id (not condition_id) is the shared identifier space:
+    AutoSubscription.token_ids stores the same CLOB token ids the decoded
+    OrderFilledEvent carries.
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="tracked-market", question="Q", category="c", market_score=0.9, tier=1,
+        subscribed_at=time.time(), status="active", token_ids=["some-other-token"],
+    ))
+    db.commit()
+
+    service._process_batch(db, [_event(token_id="4242")])
+
+    assert db.query(OnchainTrade).count() == 0
+    assert service.metrics["events_skipped_total"] == 1
+
+
+def test_process_batch_processes_events_for_tracked_markets():
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="tracked-market", question="Q", category="c", market_score=0.9, tier=1,
+        subscribed_at=time.time(), status="active", token_ids=["4242", "other"],
+    ))
+    db.commit()
+
+    service._process_batch(db, [_event(token_id="4242")])
+
+    assert db.query(OnchainTrade).count() == 1
+
+
+def test_process_batch_processes_unfiltered_when_tracked_lookup_fails():
+    """A transient failure loading the tracked-token-id set must fail
+    open (process everything), not silently drop trades for tracked
+    markets -- once _fetch_logs marks a block range as successfully
+    covered, that range is never re-fetched, so dropping trades here due
+    to a DB hiccup would be a permanent, unrecoverable loss. Occasionally
+    processing an untracked market's trade during that same rare hiccup
+    is the safer failure mode. Drops just the auto_subscription table
+    (rather than mocking db.query broadly) so the tracked-lookup query
+    fails with a real error while every other query _process_batch makes
+    (the dedup check, the wallet counter bump) still works normally.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    AutoSubscription.__table__.drop(engine)
+    session_factory = sessionmaker(bind=engine)
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+
+    service._process_batch(db, [_event(token_id="4242")])
+
+    assert db.query(OnchainTrade).count() == 1
+
+
 def test_process_batch_is_idempotent_on_duplicate_blockchain_id():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
+    _seed_tracked_market(db)
     event = _event()
 
     service._process_batch(db, [event])
@@ -279,6 +357,7 @@ def test_process_batch_one_bad_event_does_not_abort_batch():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
+    _seed_tracked_market(db)
     good = _event(tx="0x" + "5" * 64)
     bad = _event(tx="0x" + "6" * 64, maker=None)  # None wallet_address -> DB error
 
@@ -298,6 +377,7 @@ def test_process_batch_rolls_back_trade_when_counter_bump_fails():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
+    _seed_tracked_market(db)
 
     with patch(
         "blockchain.polygon_sync.increment_wallet_counters",
@@ -317,6 +397,7 @@ def test_process_batch_commits_trade_and_counter_together():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
+    _seed_tracked_market(db)
 
     service._process_batch(db, [_event()])
     db.close()
@@ -507,6 +588,7 @@ def test_process_batch_updates_metrics_counters():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
+    _seed_tracked_market(db)
 
     service._process_batch(db, [_event(), _event(tx="0x" + "7" * 64, taker="0x" + "9" * 40)])
 
