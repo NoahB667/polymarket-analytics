@@ -143,6 +143,7 @@ def test_full_order_flow_pipeline_integration(mock_redis):
     assert called_ttl == 300
     assert called_data["direction"] == "BUY"
     assert called_data["metrics"]["ofi_1m"] == 1.0
+    assert called_data["latest_price"] == 0.60
 
     mock_queue.put_nowait.assert_called_once()
     queued_payload = mock_queue.put_nowait.call_args[0][0]
