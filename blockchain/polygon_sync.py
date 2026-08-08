@@ -296,7 +296,15 @@ class PolygonSyncService:
             if not is_taker_side(event):
                 self.metrics["events_skipped_total"] += 1
                 continue
-            if tracked_token_ids is not None and event.token_id not in tracked_token_ids:
+            # Empty and None both mean "no filter, process everything" --
+            # an empty set is a successful query that legitimately found
+            # zero active markets (e.g. the cold-start window before
+            # auto-discovery's first cycle has committed anything), not a
+            # failure, but it must fail open the same way a failed lookup
+            # does: dropping every event here would be the exact
+            # permanent, unrecoverable loss this filter's fail-open design
+            # exists to prevent.
+            if tracked_token_ids and event.token_id not in tracked_token_ids:
                 # Matches the scoping the Dune-based Signal 2 pipeline
                 # already applies (WHERE condition_id IN (tracked)) --
                 # without this, every on-chain trade for every Polymarket
@@ -340,14 +348,18 @@ class PolygonSyncService:
         """CLOB token ids for every currently active auto-tracked market.
 
         Returns:
-            The set of tracked token ids, or None if the lookup itself
-            failed -- callers must treat None as "no filter, process
-            everything" rather than skip every event. Once _fetch_logs
+            The set of tracked token ids -- empty if the query succeeded
+            but legitimately found no active markets yet (e.g. the
+            cold-start window before auto-discovery's first cycle has
+            committed anything) -- or None if the lookup itself failed.
+            Callers must treat both empty and None as "no filter, process
+            everything" rather than skip every event: once _fetch_logs
             marks a block range as successfully covered, that range is
             never re-fetched, so silently dropping trades here due to a
-            transient DB hiccup would be a permanent, unrecoverable loss
-            -- worse than occasionally processing an untracked market's
-            trade during that same rare hiccup.
+            transient DB hiccup (or a legitimately-empty tracked set)
+            would be a permanent, unrecoverable loss -- worse than
+            occasionally processing an untracked market's trade during
+            that same rare window.
         """
         try:
             tracked: set = set()
@@ -355,6 +367,8 @@ class PolygonSyncService:
             for (token_ids,) in rows:
                 if token_ids:
                     tracked.update(token_ids)
+            if not tracked:
+                logger.warning("Polygon sync: no active tracked markets found, processing unfiltered this batch")
             return tracked
         except Exception as e:
             logger.warning(

@@ -338,6 +338,28 @@ def test_process_batch_processes_unfiltered_when_tracked_lookup_fails():
     assert db.query(OnchainTrade).count() == 1
 
 
+def test_process_batch_processes_unfiltered_when_no_markets_tracked_yet():
+    """Regression: _get_tracked_token_ids returning an empty set (a
+    successful query that legitimately found zero active markets, e.g.
+    the cold-start window before auto-discovery's first cycle has
+    committed anything) was NOT treated the same as a failed lookup --
+    only `is not None` was checked, so a real empty set silently dropped
+    every single event even though nothing actually failed. That is the
+    exact permanent, unrecoverable loss the fail-open design exists to
+    prevent, arriving through a different door: an empty AutoSubscription
+    table (not a query error) also must fail open.
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    db = session_factory()
+    # No AutoSubscription rows at all -- a real, successful query that
+    # legitimately finds nothing tracked yet, not a DB failure.
+
+    service._process_batch(db, [_event(token_id="4242")])
+
+    assert db.query(OnchainTrade).count() == 1
+
+
 def test_process_batch_is_idempotent_on_duplicate_blockchain_id():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
