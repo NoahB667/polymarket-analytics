@@ -420,6 +420,51 @@ def test_fetch_logs_stops_at_first_persistently_failing_chunk():
     assert w3.eth.get_logs.call_count == 4  # 1 success + 3 exhausted retries, chunk 3 never attempted
 
 
+def test_fetch_logs_halves_chunk_on_block_range_error_in_response_body():
+    """Regression: confirmed live against a real Free-tier Alchemy
+    endpoint that a block-range-too-large rejection comes back as a plain
+    requests.HTTPError whose str() is just "400 Client Error: Bad Request
+    for url: ..." -- the actual detail ("Under the Free tier plan, you can
+    make eth_getLogs requests with up to a 10 block range...") lives only
+    in the response body (e.response.text), which the old code never
+    inspected. The existing "block range" detection checked only str(e),
+    so this exact real-world error was silently treated as a generic
+    failure every time: max_blocks_per_query (default 1000) never shrank
+    below Alchemy's real 10-block limit, so every retry kept requesting a
+    range that was always rejected -- the sync thread made zero forward
+    progress, indefinitely, while still logging nothing beyond a generic
+    per-cycle error (itself masked by the separate unguarded-exception bug
+    fixed earlier).
+    """
+    class _FakeResponse:
+        text = (
+            '{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":'
+            '"Under the Free tier plan, you can make eth_getLogs requests '
+            'with up to a 10 block range."}}'
+        )
+
+    class _FakeHTTPError(Exception):
+        def __init__(self):
+            super().__init__("400 Client Error: Bad Request for url: https://example.com/v2/secret-key")
+            self.response = _FakeResponse()
+
+    w3 = MagicMock()
+    w3.eth.get_logs.side_effect = [
+        _FakeHTTPError(),  # 1-1000 requested, real Alchemy-shaped rejection
+        [],  # shrunk to 1-500, succeeds
+        [],  # next chunk 501-1000, succeeds
+    ]
+    service = _service()
+    service._w3 = w3
+    service.max_blocks_per_query = 1000
+
+    logs, last_successful_block = service._fetch_logs(from_block=1, to_block=1000)
+
+    assert service.max_blocks_per_query == 500
+    assert logs == []
+    assert last_successful_block == 1000
+
+
 def test_fetch_chunk_with_retry_returns_failure_after_exhausting_retries():
     w3 = MagicMock()
     w3.eth.get_logs.side_effect = Exception("boom")

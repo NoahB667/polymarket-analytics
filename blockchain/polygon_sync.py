@@ -255,7 +255,18 @@ class PolygonSyncService:
                 return self._w3.eth.get_logs(filter_params), True
             except Exception as e:
                 self.metrics["rpc_errors_total"] += 1
-                message = str(e).lower()
+                # Regression: confirmed live against a real Free-tier
+                # Alchemy endpoint that a block-range-too-large rejection
+                # arrives as a plain requests.HTTPError whose str() is
+                # just "400 Client Error: Bad Request for url: ..." -- the
+                # actual detail ("...up to a 10 block range...") lives
+                # only in the response body. Checking str(e) alone missed
+                # every real occurrence of this error: max_blocks_per_query
+                # never shrank below the provider's real limit, so every
+                # retry kept requesting a range that was always rejected,
+                # making zero forward progress indefinitely.
+                response_text = getattr(getattr(e, "response", None), "text", "") or ""
+                message = (str(e) + " " + response_text).lower()
                 if "block range" in message:
                     self.max_blocks_per_query = max(1, self.max_blocks_per_query // 2)
                     logger.warning(f"Polygon sync: block range too large, reduced chunk to {self.max_blocks_per_query}")
@@ -263,7 +274,10 @@ class PolygonSyncService:
                 elif "rate limit" in message:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                 else:
-                    logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {redact_urls(e)}")
+                    logger.error(
+                        f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): "
+                        f"{redact_urls(e)} | response: {redact_urls(response_text)[:500]}"
+                    )
                     time.sleep(RETRY_DELAY_SECONDS)
         logger.error(f"Polygon sync: eth_getLogs failed after {MAX_RETRIES} retries, skipping {from_block}-{to_block}")
         return [], False
