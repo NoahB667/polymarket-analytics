@@ -14,19 +14,23 @@ from dotenv import load_dotenv
 from redis_config import r
 from db import engine, SessionLocal, get_db_session, logger, ensure_additive_columns
 
-from models.orm import Base, PriceImpactCheck, Subscription, Trade
+from models.orm import Base, PriceImpactCheck, Subscription, Trade, Signal, PaperPosition, AutoSubscription
 from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
 from core.global_ws_manager import GlobalWebSocketManager
 from core.auto_discovery import run_scheduler_loop
 from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop, run_score_recalculation_loop
 from blockchain.polygon_sync import PolygonSyncService
+from analytics.signal_combiner import run_signal_combiner_loop
+from execution.paper_trader import has_open_position, open_position, run_position_monitor_loop
 
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
+SIGNAL_COMBINER_INTERVAL_SECONDS = float(os.getenv("SIGNAL_COMBINER_INTERVAL_SECONDS", "60"))
+POSITION_MONITOR_INTERVAL_SECONDS = float(os.getenv("POSITION_MONITOR_INTERVAL_SECONDS", "60"))
 
 # Active C++ Core Streams
 market_streams: Dict[str, WebSocketOrderBook] = {}
@@ -41,6 +45,8 @@ _auto_discovery_started = False
 _wallet_intelligence_started = False
 _polygon_sync_started = False
 _score_recalculation_started = False
+_signal_combiner_started = False
+_position_monitor_started = False
 polygon_sync_service: Optional[PolygonSyncService] = None
 
 def db_writer_worker():
@@ -416,6 +422,60 @@ async def lifespan(app: FastAPI):
             daemon=True,
         ).start()
         _score_recalculation_started = True
+
+    # 9. Start the signal combiner thread (Step 10) -- combines Signal 1 +
+    # Signal 2 for every active market and opens paper positions on TRADE.
+    global _signal_combiner_started
+    if not _signal_combiner_started:
+        def _open_paper_position(db, combined_signal) -> None:
+            auto_sub = db.query(AutoSubscription).filter_by(condition_id=combined_signal.market_id).first()
+            if auto_sub is None or not auto_sub.token_ids:
+                return
+            if combined_signal.direction != "BUY":
+                # SELL-direction TRADE signals are logged to `signal` but not
+                # acted on -- see docs/superpowers/plans/2026-08-07-signal-combiner-paper-trader.md.
+                return
+            latest_price = None
+            try:
+                cached = r.get(f"signal:1:score:{combined_signal.slug}")
+                if cached:
+                    latest_price = json.loads(cached).get("latest_price")
+            except Exception as e:
+                logger.error(f"Signal combiner: failed to read latest_price for {combined_signal.slug}: {e}")
+            if not latest_price:
+                return
+            open_position(
+                db, combined_signal, asset_id=auto_sub.token_ids[0], entry_price=latest_price,
+                alert_callback=lambda msg: send_telegram_alert(ADMIN_CHAT_ID, msg) if ADMIN_CHAT_ID else None,
+            )
+
+        threading.Thread(
+            target=run_signal_combiner_loop,
+            kwargs={
+                "session_factory": SessionLocal,
+                "redis_client": r,
+                "open_position_fn": has_open_position,
+                "on_trade_signal": _open_paper_position,
+                "interval_seconds": SIGNAL_COMBINER_INTERVAL_SECONDS,
+            },
+            daemon=True,
+        ).start()
+        _signal_combiner_started = True
+
+    # 10. Start the position monitor thread (Step 10) -- closes paper
+    # positions on stop-loss/take-profit.
+    global _position_monitor_started
+    if not _position_monitor_started:
+        threading.Thread(
+            target=run_position_monitor_loop,
+            kwargs={
+                "session_factory": SessionLocal,
+                "alert_callback": lambda msg: send_telegram_alert(ADMIN_CHAT_ID, msg) if ADMIN_CHAT_ID else None,
+                "interval_seconds": POSITION_MONITOR_INTERVAL_SECONDS,
+            },
+            daemon=True,
+        ).start()
+        _position_monitor_started = True
 
     # Sync state tables non-blockingly on startup
     db = SessionLocal()
