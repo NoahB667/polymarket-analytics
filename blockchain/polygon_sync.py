@@ -31,6 +31,18 @@ DEFAULT_MAX_BLOCKS_PER_QUERY = int(os.getenv("POLYGON_MAX_BLOCKS_PER_QUERY", "10
 DEFAULT_POLL_INTERVAL_SECONDS = float(os.getenv("POLYGON_POLL_INTERVAL_SECONDS", "2"))
 DEFAULT_MAX_CATCHUP_BLOCKS = int(os.getenv("POLYGON_MAX_CATCHUP_BLOCKS", "10000"))
 DEFAULT_RPC_TIMEOUT_SECONDS = float(os.getenv("POLYGON_RPC_TIMEOUT_SECONDS", "30"))
+# Regression: max_catchup_blocks bounds the block SPAN per cycle, but a
+# cycle's actual cost is (span / max_blocks_per_query) sequential
+# eth_getLogs calls. Once the block-range auto-shrink (see
+# _fetch_chunk_with_retry) correctly detects a provider's real per-call
+# limit -- confirmed live to be as low as 10 blocks on a free-tier plan --
+# a single "capped" 10,000-block cycle can balloon into ~1,000 sequential
+# RPC round-trips, recreating the exact unbroken-burst, never-idles
+# problem max_catchup_blocks was introduced to fix, just measured in
+# requests instead of blocks. This bounds the number of requests per
+# cycle directly, so cycle duration stays predictable regardless of how
+# small the provider's real limit turns out to be.
+DEFAULT_MAX_CHUNKS_PER_CYCLE = int(os.getenv("POLYGON_MAX_CHUNKS_PER_CYCLE", "30"))
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 LAST_BLOCK_REDIS_KEY = "polygon:last_block"
@@ -56,6 +68,7 @@ class PolygonSyncService:
         self.max_blocks_per_query = DEFAULT_MAX_BLOCKS_PER_QUERY
         self.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS
         self.max_catchup_blocks = DEFAULT_MAX_CATCHUP_BLOCKS
+        self.max_chunks_per_cycle = DEFAULT_MAX_CHUNKS_PER_CYCLE
         # Regression: with no timeout configured, web3.py's default HTTP
         # client behavior left a slow/unresponsive RPC endpoint able to
         # hang eth_blockNumber or eth_getLogs indefinitely -- no exception,
@@ -141,7 +154,20 @@ class PolygonSyncService:
                     # thread actually idles for poll_interval_seconds
                     # between cycles while still making steady forward
                     # progress.
-                    to_block = min(current_block, last_processed + self.max_catchup_blocks)
+                    #
+                    # Also capped at max_blocks_per_query * max_chunks_per_cycle
+                    # -- max_catchup_blocks alone bounds the block SPAN, but a
+                    # cycle's actual cost is (span / max_blocks_per_query)
+                    # sequential eth_getLogs calls. Once the block-range
+                    # auto-shrink correctly detects a provider's real
+                    # per-call limit (confirmed live: as low as 10 blocks on
+                    # a free-tier plan), a "capped" 10,000-block cycle can
+                    # balloon into ~1,000 sequential RPC round-trips --
+                    # recreating the same unbroken-burst problem this cap
+                    # was introduced to fix, just measured in requests
+                    # instead of blocks. Whichever bound is smaller wins.
+                    request_bounded_blocks = self.max_blocks_per_query * self.max_chunks_per_cycle
+                    to_block = min(current_block, last_processed + min(self.max_catchup_blocks, request_bounded_blocks))
                     logs, last_successful_block = self._fetch_logs(last_processed + 1, to_block)
                     db = self.db_session_factory()
                     try:

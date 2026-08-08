@@ -154,6 +154,47 @@ def test_sync_loop_caps_catchup_to_max_catchup_blocks_per_cycle():
     mock_fetch_logs.assert_called_once_with(1, 100)
 
 
+def test_sync_loop_caps_catchup_to_max_chunks_per_cycle_when_chunk_size_is_small():
+    """Regression: max_catchup_blocks bounds the block SPAN per cycle, but
+    a cycle's actual cost is (span / max_blocks_per_query) sequential
+    eth_getLogs calls. Once the block-range auto-shrink correctly detects
+    a provider's real per-call limit (confirmed live: as low as 10 blocks
+    on a free-tier plan), a single "capped" 10,000-block cycle balloons
+    into ~1,000 sequential RPC round-trips -- recreating the unbroken-
+    burst, never-idles problem max_catchup_blocks was introduced to fix,
+    just measured in requests instead of blocks. max_chunks_per_cycle
+    must win when it produces a smaller bound than max_catchup_blocks.
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    service.poll_interval_seconds = 0
+    service.max_catchup_blocks = 10_000
+    service.max_blocks_per_query = 10
+    service.max_chunks_per_cycle = 30
+
+    fake_eth = _FakeEth(block_number_value=1_000_000)
+    service._w3.eth = fake_eth
+
+    with patch.object(service, "_get_last_block", return_value=0), \
+         patch.object(service, "_fetch_logs", return_value=([], 300)) as mock_fetch_logs, \
+         patch.object(service, "_save_last_block"):
+
+        real_wait = service._stop_event.wait
+
+        def _stop_after_one_iteration(timeout):
+            result = real_wait(timeout)
+            service._stop_event.set()
+            return result
+
+        service._stop_event.wait = _stop_after_one_iteration
+
+        service._sync_loop()
+
+    # Capped to max_blocks_per_query(10) * max_chunks_per_cycle(30) = 300,
+    # not max_catchup_blocks(10_000) and not the raw current_block.
+    mock_fetch_logs.assert_called_once_with(1, 300)
+
+
 def test_sync_loop_survives_exception_in_fetch_and_process_block():
     """Regression: _fetch_logs and everything after it (decode, process,
     save) ran unguarded in _sync_loop -- any exception there propagated
