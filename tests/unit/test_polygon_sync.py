@@ -315,13 +315,17 @@ def test_process_batch_skips_non_taker_side_events():
     assert db.query(OnchainTrade).count() == 0
 
 
-def test_process_batch_skips_events_for_untracked_markets():
-    """The Dune-based Signal 2 pipeline already scopes itself to only
-    currently auto-tracked markets (WHERE condition_id IN (tracked)) --
-    the Polygon live monitor had no equivalent filter and persisted every
-    on-chain trade for every Polymarket market regardless of relevance,
-    wasting DB writes and wallet-profiling compute on markets nothing
-    tracks. token_id (not condition_id) is the shared identifier space:
+def test_process_batch_stores_trade_but_skips_wallet_counters_for_untracked_markets():
+    """Wallet scoring (compile_profile) deliberately reads a wallet's
+    *entire* cross-market history -- category_concentration, unique_markets,
+    etc. -- so narrowing what gets CAPTURED to only tracked markets would
+    bias every wallet's profile, not just cut storage waste. The
+    OnchainTrade row is always stored regardless of tracked status; only
+    the expensive extra work (the wallet counter bump) is scoped to
+    markets auto-discovery currently tracks -- there's no value in
+    immediately re-scoring a wallet purely because it traded on a market
+    nothing here cares about (e.g. sports instead of geopolitics).
+    token_id (not condition_id) is the shared identifier space:
     AutoSubscription.token_ids stores the same CLOB token ids the decoded
     OrderFilledEvent carries.
     """
@@ -336,11 +340,15 @@ def test_process_batch_skips_events_for_untracked_markets():
 
     service._process_batch(db, [_event(token_id="4242")])
 
-    assert db.query(OnchainTrade).count() == 0
-    assert service.metrics["events_skipped_total"] == 1
+    trade = db.query(OnchainTrade).first()
+    assert trade is not None  # always stored, regardless of tracked status
+    assert trade.market_id == "4242"
+    assert db.query(WalletProfile).count() == 0  # counter bump skipped -- not a tracked market
+    assert service.metrics["wallet_profiles_updated_total"] == 0
+    assert service.metrics["events_processed_total"] == 1  # still counted as processed (stored)
 
 
-def test_process_batch_processes_events_for_tracked_markets():
+def test_process_batch_bumps_wallet_counters_for_tracked_markets():
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
     db = session_factory()
@@ -353,19 +361,24 @@ def test_process_batch_processes_events_for_tracked_markets():
     service._process_batch(db, [_event(token_id="4242")])
 
     assert db.query(OnchainTrade).count() == 1
+    profile = db.query(WalletProfile).filter_by(wallet_address="0xmaker").first()
+    assert profile is not None
+    assert profile.total_trades == 1
+    assert service.metrics["wallet_profiles_updated_total"] == 1
 
 
-def test_process_batch_processes_unfiltered_when_tracked_lookup_fails():
-    """A transient failure loading the tracked-token-id set must fail
-    open (process everything), not silently drop trades for tracked
-    markets -- once _fetch_logs marks a block range as successfully
-    covered, that range is never re-fetched, so dropping trades here due
-    to a DB hiccup would be a permanent, unrecoverable loss. Occasionally
-    processing an untracked market's trade during that same rare hiccup
-    is the safer failure mode. Drops just the auto_subscription table
-    (rather than mocking db.query broadly) so the tracked-lookup query
-    fails with a real error while every other query _process_batch makes
-    (the dedup check, the wallet counter bump) still works normally.
+def test_process_batch_stores_trade_but_skips_wallet_counters_when_tracked_lookup_fails():
+    """A transient failure loading the tracked-token-id set must still
+    store the trade (the OnchainTrade row is never conditional on tracked
+    status -- see test_process_batch_stores_trade_but_skips_wallet_
+    counters_for_untracked_markets), but the extra wallet-counter work is
+    conservatively skipped when tracked status can't be determined,
+    matching the untracked case: nothing is permanently lost either way,
+    since a future confirmed-tracked trade (or a periodic full rescore)
+    can still bump this wallet's counters later. Drops just the
+    auto_subscription table (rather than mocking db.query broadly) so
+    the tracked-lookup query fails with a real error while every other
+    query _process_batch makes (the dedup check) still works normally.
     """
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
@@ -377,18 +390,16 @@ def test_process_batch_processes_unfiltered_when_tracked_lookup_fails():
     service._process_batch(db, [_event(token_id="4242")])
 
     assert db.query(OnchainTrade).count() == 1
+    assert db.query(WalletProfile).count() == 0
+    assert service.metrics["wallet_profiles_updated_total"] == 0
 
 
-def test_process_batch_processes_unfiltered_when_no_markets_tracked_yet():
-    """Regression: _get_tracked_token_ids returning an empty set (a
-    successful query that legitimately found zero active markets, e.g.
-    the cold-start window before auto-discovery's first cycle has
-    committed anything) was NOT treated the same as a failed lookup --
-    only `is not None` was checked, so a real empty set silently dropped
-    every single event even though nothing actually failed. That is the
-    exact permanent, unrecoverable loss the fail-open design exists to
-    prevent, arriving through a different door: an empty AutoSubscription
-    table (not a query error) also must fail open.
+def test_process_batch_stores_trade_but_skips_wallet_counters_when_no_markets_tracked_yet():
+    """_get_tracked_token_ids returning an empty set (a successful query
+    that legitimately found zero active markets, e.g. the cold-start
+    window before auto-discovery's first cycle has committed anything)
+    must be treated the same as a failed lookup for the counter-bump
+    decision: skip it. The trade itself is still always stored.
     """
     session_factory = _session_factory()
     service = _service(db_session_factory=session_factory)
@@ -399,6 +410,8 @@ def test_process_batch_processes_unfiltered_when_no_markets_tracked_yet():
     service._process_batch(db, [_event(token_id="4242")])
 
     assert db.query(OnchainTrade).count() == 1
+    assert db.query(WalletProfile).count() == 0
+    assert service.metrics["wallet_profiles_updated_total"] == 0
 
 
 def test_process_batch_is_idempotent_on_duplicate_blockchain_id():

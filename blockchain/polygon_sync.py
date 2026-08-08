@@ -309,33 +309,29 @@ class PolygonSyncService:
         return [], False
 
     def _process_batch(self, db: Any, events: List[OrderFilledEvent]) -> int:
-        """Filters to taker-side events, dedupes, writes OnchainTrade rows,
-        and bumps wallet counters. Best-effort: one bad event is logged and
-        skipped, never aborts the batch.
+        """Filters to taker-side events, dedupes, writes OnchainTrade rows
+        for every market (not just currently-tracked ones -- wallet
+        scoring in compile_profile deliberately looks at a wallet's
+        *entire* cross-market history, e.g. category_concentration and
+        unique_markets, so narrowing what gets captured would bias every
+        wallet's profile, not just cut storage waste), and bumps wallet
+        counters (the expensive per-event work: a DB write plus marking
+        the wallet score_stale for the next full rescore) only for
+        markets currently tracked by auto-discovery -- there's no value
+        in immediately re-scoring a wallet purely because it traded on a
+        market nothing here cares about (e.g. sports) when it could just
+        as easily be scored on its next trade in a market that matters.
+        Best-effort: one bad event is logged and skipped, never aborts
+        the batch.
 
         Returns:
-            Count of events successfully processed.
+            Count of events successfully processed (stored), regardless
+            of whether the wallet-counter bump also happened.
         """
         tracked_token_ids = self._get_tracked_token_ids(db)
         processed = 0
         for event in events:
             if not is_taker_side(event):
-                self.metrics["events_skipped_total"] += 1
-                continue
-            # Empty and None both mean "no filter, process everything" --
-            # an empty set is a successful query that legitimately found
-            # zero active markets (e.g. the cold-start window before
-            # auto-discovery's first cycle has committed anything), not a
-            # failure, but it must fail open the same way a failed lookup
-            # does: dropping every event here would be the exact
-            # permanent, unrecoverable loss this filter's fail-open design
-            # exists to prevent.
-            if tracked_token_ids and event.token_id not in tracked_token_ids:
-                # Matches the scoping the Dune-based Signal 2 pipeline
-                # already applies (WHERE condition_id IN (tracked)) --
-                # without this, every on-chain trade for every Polymarket
-                # market got persisted and wallet-profiled regardless of
-                # whether anything currently tracks it.
                 self.metrics["events_skipped_total"] += 1
                 continue
             bid = blockchain_id(event)
@@ -350,21 +346,36 @@ class PolygonSyncService:
                     entry_price=event.implied_price,
                     block_timestamp=event.block_timestamp,
                 ))
-                # Deliberately NO commit here -- the OnchainTrade insert and
-                # the wallet counter bump must land in ONE transaction
-                # (increment_wallet_counters issues the commit covering
-                # both). Committing the trade first meant that if the
-                # counter bump then raised, the rollback could only undo the
-                # counter work: the trade row survived, so the dedup check
-                # above would `continue` past it on every future run and the
-                # counter bump would be lost permanently -- silently
-                # understating total_trades/long_shot_attempts and leaving
-                # score_stale unset, corrupting insider_score's inputs with
-                # no error trace after the fact.
-                increment_wallet_counters(db, event)
+                # Only bump wallet counters (the expensive, optional work)
+                # for a market we can positively confirm is tracked --
+                # both an empty tracked set (nothing tracked yet, e.g. the
+                # cold-start window before auto-discovery's first cycle
+                # has committed anything) and a failed lookup (None) mean
+                # "we don't know", and the conservative default is to skip
+                # the extra work rather than guess. Unlike the OnchainTrade
+                # row itself, this is not a permanent-loss risk: the trade
+                # is still captured, so a future trade on a confirmed
+                # tracked market (or a periodic full rescore) can still
+                # mark this wallet score_stale later.
+                if tracked_token_ids and event.token_id in tracked_token_ids:
+                    # Deliberately NO commit here -- the OnchainTrade
+                    # insert and the wallet counter bump must land in ONE
+                    # transaction (increment_wallet_counters issues the
+                    # commit covering both). Committing the trade first
+                    # meant that if the counter bump then raised, the
+                    # rollback could only undo the counter work: the trade
+                    # row survived, so the dedup check above would
+                    # `continue` past it on every future run and the
+                    # counter bump would be lost permanently -- silently
+                    # understating total_trades/long_shot_attempts and
+                    # leaving score_stale unset, corrupting insider_score's
+                    # inputs with no error trace after the fact.
+                    increment_wallet_counters(db, event)
+                    self.metrics["wallet_profiles_updated_total"] += 1
+                else:
+                    db.commit()
                 processed += 1
                 self.metrics["events_processed_total"] += 1
-                self.metrics["wallet_profiles_updated_total"] += 1
             except Exception as e:
                 db.rollback()
                 logger.error(f"Polygon sync: failed to process event tx={event.tx_hash}: {redact_urls(e)}")
@@ -373,19 +384,24 @@ class PolygonSyncService:
     def _get_tracked_token_ids(self, db: Any) -> Optional[set]:
         """CLOB token ids for every currently active auto-tracked market.
 
+        Used only to decide whether _process_batch's per-event wallet
+        counter bump (extra, optional work) is worth doing -- NOT to
+        decide whether to store the OnchainTrade row itself, which always
+        happens regardless (wallet scoring reads a wallet's entire
+        cross-market history, so narrowing what gets *captured* would
+        bias every wallet's profile, not just cut waste). Getting this
+        wrong is therefore low-stakes, unlike the storage decision: a
+        wallet that doesn't get its counters bumped this cycle can still
+        get them bumped on a later confirmed-tracked trade, or via a
+        periodic full rescore -- nothing is permanently lost.
+
         Returns:
             The set of tracked token ids -- empty if the query succeeded
             but legitimately found no active markets yet (e.g. the
             cold-start window before auto-discovery's first cycle has
             committed anything) -- or None if the lookup itself failed.
-            Callers must treat both empty and None as "no filter, process
-            everything" rather than skip every event: once _fetch_logs
-            marks a block range as successfully covered, that range is
-            never re-fetched, so silently dropping trades here due to a
-            transient DB hiccup (or a legitimately-empty tracked set)
-            would be a permanent, unrecoverable loss -- worse than
-            occasionally processing an untracked market's trade during
-            that same rare window.
+            Callers should treat both empty and None the same way: skip
+            the counter bump rather than guess at tracked status.
         """
         try:
             tracked: set = set()
@@ -394,7 +410,7 @@ class PolygonSyncService:
                 if token_ids:
                     tracked.update(token_ids)
             if not tracked:
-                logger.warning("Polygon sync: no active tracked markets found, processing unfiltered this batch")
+                logger.warning("Polygon sync: no active tracked markets found, skipping wallet-counter bumps this batch")
             return tracked
         except Exception as e:
             logger.warning(
