@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -538,12 +539,23 @@ def test_run_discovery_cycle_backfills_to_min_active_markets_when_disk_normal():
     tier1_market = dict(_TARIFF_MARKET)  # scores > 0.8
 
     # Category-relevant (economics) but scores well below AUTO_DISCOVERY_THRESHOLD
-    # (0.5): base 0.4 + tiny volume/time/spread bumps only.
+    # (0.5): base 0.4 + tiny volume/time/spread bumps only. Regression: a
+    # previous hardcoded endDate ("2026-08-10") drifted from "just under
+    # MIN_DAYS_REMAINING's 2-day floor" to "in the past" as real time
+    # passed, then a naive fix to a far-future date ("2099-01-01")
+    # accidentally pushed days_remaining into TIME_BRACKETS' 90+ day
+    # bracket (+0.20), crossing AUTO_DISCOVERY_THRESHOLD and making these
+    # markets qualify normally -- defeating the point of this test, which
+    # verifies the floor-backfill path specifically. A date relative to
+    # "now" (3 days out) keeps them permanently in the intended
+    # 2-to-7-day window (above MIN_DAYS_REMAINING's hard floor, below
+    # TIME_BRACKETS' first bonus bracket), immune to drift either way.
+    near_term_end_date = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     low_score_markets = []
     for i in range(3):
         m = {
             "question": f"Will some economic indicator {i} happen?", "category": "economics",
-            "volume24hr": "500", "endDate": "2026-08-10T00:00:00Z",
+            "volume24hr": "500", "endDate": near_term_end_date,
             "bestBid": "0.40", "bestAsk": "0.60", "outcomePrices": '["0.5", "0.5"]',
             "closed": False, "slug": f"low-score-econ-{i}", "token_ids": [f"tok_low_{i}"],
         }
@@ -575,7 +587,7 @@ def test_run_discovery_cycle_does_not_backfill_when_disk_not_normal():
     session_factory = _sqlite_session_factory()
     low_score_market = {
         "question": "Will some economic indicator happen?", "category": "economics",
-        "volume24hr": "500", "endDate": "2026-08-10T00:00:00Z",
+        "volume24hr": "500", "endDate": "2099-01-01T00:00:00Z",
         "bestBid": "0.40", "bestAsk": "0.60", "outcomePrices": '["0.5", "0.5"]',
         "closed": False, "slug": "low-score-econ", "token_ids": ["tok_low"],
     }
