@@ -30,6 +30,7 @@ logger = logging.getLogger("polymarket.blockchain.polygon_sync")
 DEFAULT_MAX_BLOCKS_PER_QUERY = int(os.getenv("POLYGON_MAX_BLOCKS_PER_QUERY", "1000"))
 DEFAULT_POLL_INTERVAL_SECONDS = float(os.getenv("POLYGON_POLL_INTERVAL_SECONDS", "2"))
 DEFAULT_MAX_CATCHUP_BLOCKS = int(os.getenv("POLYGON_MAX_CATCHUP_BLOCKS", "10000"))
+DEFAULT_RPC_TIMEOUT_SECONDS = float(os.getenv("POLYGON_RPC_TIMEOUT_SECONDS", "30"))
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 LAST_BLOCK_REDIS_KEY = "polygon:last_block"
@@ -55,7 +56,16 @@ class PolygonSyncService:
         self.max_blocks_per_query = DEFAULT_MAX_BLOCKS_PER_QUERY
         self.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS
         self.max_catchup_blocks = DEFAULT_MAX_CATCHUP_BLOCKS
-        self._w3 = Web3(Web3.HTTPProvider(rpc_url))
+        # Regression: with no timeout configured, web3.py's default HTTP
+        # client behavior left a slow/unresponsive RPC endpoint able to
+        # hang eth_blockNumber or eth_getLogs indefinitely -- no exception,
+        # no timeout, no progress, forever. Confirmed live: the sync thread
+        # got stuck on its very first RPC call and never logged another
+        # line for days, completely and silently disabling Polygon
+        # on-chain sync. An explicit timeout ensures a hung call
+        # eventually raises, which this module's existing try/except
+        # blocks already treat as a normal, retryable, non-fatal RPC error.
+        self._w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": DEFAULT_RPC_TIMEOUT_SECONDS}))
         # Polygon is a PoA-style chain -- its block headers' extraData field
         # exceeds the 32 bytes web3.py's default block formatter expects,
         # raising ExtraDataLengthError on every eth_getBlock call (used

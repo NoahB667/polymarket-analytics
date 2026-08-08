@@ -176,6 +176,26 @@ def test_sync_loop_survives_exception_in_fetch_and_process_block():
     assert service.metrics["rpc_errors_total"] == 1
 
 
+def test_service_configures_http_provider_timeout():
+    """Regression: Web3.HTTPProvider had no request timeout configured, so
+    a slow/unresponsive RPC endpoint could hang eth_blockNumber or
+    eth_getLogs indefinitely -- no exception, no timeout, no progress,
+    forever. Confirmed live: the sync thread got stuck on its very first
+    RPC call and never logged another line for days, completely and
+    silently disabling Polygon on-chain sync. An explicit timeout ensures
+    a hung call eventually raises, which the existing try/except blocks
+    already treat as a normal, retryable, non-fatal RPC error.
+    """
+    from web3 import Web3 as RealWeb3
+
+    with patch("blockchain.polygon_sync.Web3.HTTPProvider", wraps=RealWeb3.HTTPProvider) as mock_http_provider:
+        _service()
+
+    assert mock_http_provider.call_count == 1
+    _, kwargs = mock_http_provider.call_args
+    assert kwargs.get("request_kwargs", {}).get("timeout") is not None
+
+
 def test_get_last_block_reads_redis_first():
     redis_client = MagicMock()
     redis_client.get.return_value = "500"
