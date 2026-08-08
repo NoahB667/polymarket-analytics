@@ -142,6 +142,40 @@ def test_sync_loop_caps_catchup_to_max_catchup_blocks_per_cycle():
     mock_fetch_logs.assert_called_once_with(1, 100)
 
 
+def test_sync_loop_survives_exception_in_fetch_and_process_block():
+    """Regression: _fetch_logs and everything after it (decode, process,
+    save) ran unguarded in _sync_loop -- any exception there propagated
+    straight out of the loop, silently killing the daemon thread for good
+    with no restart, no retry, and critically no error logged either.
+    Confirmed live: the sync thread died silently days before this test was
+    written and never logged a single error afterward. One bad cycle must
+    be logged and retried next interval, matching this module's existing
+    non-fatal-RPC-error philosophy (see the eth_blockNumber try/except).
+    """
+    session_factory = _session_factory()
+    service = _service(db_session_factory=session_factory)
+    service.poll_interval_seconds = 0
+
+    fake_eth = _FakeEth(block_number_value=100)
+    service._w3.eth = fake_eth
+
+    with patch.object(service, "_get_last_block", return_value=0), \
+         patch.object(service, "_fetch_logs", side_effect=RuntimeError("boom")):
+
+        real_wait = service._stop_event.wait
+
+        def _stop_after_one_iteration(timeout):
+            result = real_wait(timeout)
+            service._stop_event.set()
+            return result
+
+        service._stop_event.wait = _stop_after_one_iteration
+
+        service._sync_loop()  # must not raise
+
+    assert service.metrics["rpc_errors_total"] == 1
+
+
 def test_get_last_block_reads_redis_first():
     redis_client = MagicMock()
     redis_client.get.return_value = "500"

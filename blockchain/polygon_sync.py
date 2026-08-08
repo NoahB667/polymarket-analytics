@@ -117,42 +117,53 @@ class PolygonSyncService:
                 continue
 
             if current_block > last_processed:
-                # Capped at max_catchup_blocks per cycle -- previously this
-                # passed the raw current_block (the full, unbounded chain
-                # tip) every iteration. On a large backlog with a short
-                # poll_interval_seconds, that meant every cycle attempted
-                # hundreds of sequential eth_getLogs calls in one unbroken
-                # burst, pinning the sync thread's CPU continuously since
-                # new blocks kept arriving faster than one thread could
-                # plow through the backlog sequentially. Bounding to_block
-                # here makes each cycle do fixed, predictable work, so the
-                # thread actually idles for poll_interval_seconds between
-                # cycles while still making steady forward progress.
-                to_block = min(current_block, last_processed + self.max_catchup_blocks)
-                logs, last_successful_block = self._fetch_logs(last_processed + 1, to_block)
-                db = self.db_session_factory()
                 try:
-                    events_processed = self._process_batch(db, self._decode_logs(logs))
-                finally:
-                    db.close()
-                # Only advance past blocks eth_getLogs actually returned --
-                # if a chunk exhausted its retries (e.g. the RPC's real
-                # eth_getLogs range cap is far below max_blocks_per_query,
-                # observed live to be as low as 10 blocks on some plans vs.
-                # this project's 1000-block default), last_successful_block
-                # stops short of current_block so those blocks are retried
-                # next cycle instead of being silently skipped forever.
-                last_processed = last_successful_block
-                self._save_last_block(last_processed, events_processed)
-                self.metrics["last_synced_block"] = last_processed
-                # Reuses current_block fetched at the top of this iteration
-                # (line 112) rather than a second eth_blockNumber call --
-                # that second call was outside the try/except above, so an
-                # RPC blip here would raise uncaught out of _sync_loop and
-                # silently kill the daemon thread for good (no restart, no
-                # retry), contradicting every other RPC call in this module
-                # being treated as non-fatal.
-                self.metrics["blocks_behind"] = max(0, current_block - last_processed)
+                    # Capped at max_catchup_blocks per cycle -- previously
+                    # this passed the raw current_block (the full,
+                    # unbounded chain tip) every iteration. On a large
+                    # backlog with a short poll_interval_seconds, that
+                    # meant every cycle attempted hundreds of sequential
+                    # eth_getLogs calls in one unbroken burst, pinning the
+                    # sync thread's CPU continuously since new blocks kept
+                    # arriving faster than one thread could plow through
+                    # the backlog sequentially. Bounding to_block here
+                    # makes each cycle do fixed, predictable work, so the
+                    # thread actually idles for poll_interval_seconds
+                    # between cycles while still making steady forward
+                    # progress.
+                    to_block = min(current_block, last_processed + self.max_catchup_blocks)
+                    logs, last_successful_block = self._fetch_logs(last_processed + 1, to_block)
+                    db = self.db_session_factory()
+                    try:
+                        events_processed = self._process_batch(db, self._decode_logs(logs))
+                    finally:
+                        db.close()
+                    # Only advance past blocks eth_getLogs actually
+                    # returned -- if a chunk exhausted its retries (e.g.
+                    # the RPC's real eth_getLogs range cap is far below
+                    # max_blocks_per_query, observed live to be as low as
+                    # 10 blocks on some plans vs. this project's
+                    # 1000-block default), last_successful_block stops
+                    # short of current_block so those blocks are retried
+                    # next cycle instead of being silently skipped forever.
+                    last_processed = last_successful_block
+                    self._save_last_block(last_processed, events_processed)
+                    self.metrics["last_synced_block"] = last_processed
+                    self.metrics["blocks_behind"] = max(0, current_block - last_processed)
+                except Exception as e:
+                    # Regression: this whole block used to run unguarded --
+                    # _fetch_logs and everything after it sat outside any
+                    # try/except in this loop. Confirmed live: the sync
+                    # thread died silently days ago and never logged a
+                    # single error afterward, because whatever exception
+                    # killed it propagated straight out of _sync_loop with
+                    # nothing to catch it. Matches this module's existing
+                    # non-fatal-RPC-error philosophy (see the
+                    # eth_blockNumber try/except above): log and retry next
+                    # cycle instead of letting one bad cycle permanently
+                    # kill the daemon thread with no restart and no retry.
+                    self.metrics["rpc_errors_total"] += 1
+                    logger.error(f"Polygon sync: cycle failed, will retry next interval: {redact_urls(e)}")
 
             self._stop_event.wait(self.poll_interval_seconds)
 
