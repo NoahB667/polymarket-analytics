@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
@@ -62,6 +62,18 @@ def test_open_position_skips_when_already_open():
 
     result = pt.open_position(db, _combined_signal(), asset_id="tok-yes", entry_price=0.15)
     assert result is None
+
+
+def test_open_position_returns_none_for_sell_direction():
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+
+    result = pt.open_position(
+        db, _combined_signal(direction="SELL"), asset_id="tok-yes", entry_price=0.15,
+    )
+
+    assert result is None
+    assert db.query(PaperPosition).count() == 0
 
 
 def test_open_position_creates_row_and_alerts():
@@ -129,3 +141,21 @@ def test_run_position_monitor_cycle_closes_positions_hitting_take_profit():
         summary = pt.run_position_monitor_cycle(session_factory)
 
     assert summary == {"checked": 1, "closed": 1}
+
+
+def test_fetch_midpoint_treats_zero_as_a_valid_price():
+    response = type("Resp", (), {"status_code": 200, "json": lambda self: {"mid_price": 0.0}})()
+    with patch.object(pt.requests, "get", return_value=response):
+        assert pt.fetch_midpoint("tok-yes") == 0.0
+
+
+def test_fetch_midpoint_falls_back_to_mid_key_when_mid_price_missing():
+    response = type("Resp", (), {"status_code": 200, "json": lambda self: {"mid": 0.42}})()
+    with patch.object(pt.requests, "get", return_value=response):
+        assert pt.fetch_midpoint("tok-yes") == 0.42
+
+
+def test_fetch_midpoint_returns_none_when_both_keys_missing():
+    response = type("Resp", (), {"status_code": 200, "json": lambda self: {}})()
+    with patch.object(pt.requests, "get", return_value=response):
+        assert pt.fetch_midpoint("tok-yes") is None

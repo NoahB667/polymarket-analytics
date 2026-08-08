@@ -195,3 +195,37 @@ def test_run_signal_combiner_cycle_counts_trade_signals():
     summary = sc.run_signal_combiner_cycle(session_factory, redis_client, open_position_fn=lambda db, mid: False)
 
     assert summary == {"evaluated": 1, "trade_signals": 1}
+
+
+def test_run_signal_combiner_cycle_does_not_persist_ignore_actions():
+    """IGNORE-action markets must not grow the append-only `signal` table
+    every cycle (unbounded write volume) -- only TRADE/WATCH are persisted."""
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(_auto_subscription())
+    # No seeded insider wallets -> signal2 confidence stays low/zero, and a
+    # low signal1 confidence keeps the combined score below the IGNORE
+    # threshold (<0.50).
+    db.commit()
+    db.close()
+
+    redis_client = MagicMock()
+
+    def fake_get(key):
+        if key == "signal:1:score:test-market":
+            return orjson.dumps({"score": 0.1, "confidence": 0.1, "direction": "BUY", "latest_price": 0.15})
+        return None
+
+    redis_client.get.side_effect = fake_get
+
+    summary = sc.run_signal_combiner_cycle(session_factory, redis_client, open_position_fn=lambda db, mid: False)
+
+    assert summary["evaluated"] == 1
+    assert summary["trade_signals"] == 0
+
+    db = session_factory()
+    try:
+        rows = db.query(Signal).all()
+        assert rows == []
+    finally:
+        db.close()

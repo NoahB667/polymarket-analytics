@@ -83,6 +83,12 @@ def open_position(
     if has_open_position(db, combined.market_id):
         return None
 
+    if combined.direction != "BUY":
+        logger.debug(
+            f"Paper trader: skipping non-BUY direction '{combined.direction}' for {combined.slug}"
+        )
+        return None
+
     capital = get_available_capital(db)
     win_rate = get_rolling_win_rate(db)
     fraction = kelly_fraction(win_rate, DEFAULT_ODDS_RATIO)
@@ -140,10 +146,14 @@ def fetch_midpoint(asset_id: str) -> Optional[float]:
         if response.status_code != 200:
             return None
         data = response.json()
-        price = data.get("mid_price") or data.get("mid")
-        if not price and isinstance(data, list) and data:
-            price = data[0].get("mid_price") or data[0].get("mid")
-        return float(price) if price else None
+        price = data.get("mid_price")
+        if price is None:
+            price = data.get("mid")
+        if price is None and isinstance(data, list) and data:
+            price = data[0].get("mid_price")
+            if price is None:
+                price = data[0].get("mid")
+        return float(price) if price is not None else None
     except Exception as e:
         logger.warning(f"Paper trader: midpoint fetch failed for {asset_id}: {e}")
         return None

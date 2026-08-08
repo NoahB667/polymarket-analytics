@@ -6,7 +6,7 @@ import json
 import time
 from contextlib import contextmanager, asynccontextmanager
 from queue import Queue, Full
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from telegram import Bot
@@ -22,7 +22,8 @@ from core.auto_discovery import run_scheduler_loop
 from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop, run_score_recalculation_loop
 from blockchain.polygon_sync import PolygonSyncService
 from analytics.signal_combiner import run_signal_combiner_loop
-from execution.paper_trader import has_open_position, open_position, run_position_monitor_loop
+from execution.paper_trader import fetch_midpoint, has_open_position, open_position, run_position_monitor_loop
+from models.dataclasses import CombinedSignal
 
 
 load_dotenv()
@@ -427,7 +428,7 @@ async def lifespan(app: FastAPI):
     # Signal 2 for every active market and opens paper positions on TRADE.
     global _signal_combiner_started
     if not _signal_combiner_started:
-        def _open_paper_position(db, combined_signal) -> None:
+        def _open_paper_position(db: Any, combined_signal: CombinedSignal) -> None:
             auto_sub = db.query(AutoSubscription).filter_by(condition_id=combined_signal.market_id).first()
             if auto_sub is None or not auto_sub.token_ids:
                 return
@@ -435,17 +436,16 @@ async def lifespan(app: FastAPI):
                 # SELL-direction TRADE signals are logged to `signal` but not
                 # acted on -- see docs/superpowers/plans/2026-08-07-signal-combiner-paper-trader.md.
                 return
-            latest_price = None
-            try:
-                cached = r.get(f"signal:1:score:{combined_signal.slug}")
-                if cached:
-                    latest_price = json.loads(cached).get("latest_price")
-            except Exception as e:
-                logger.error(f"Signal combiner: failed to read latest_price for {combined_signal.slug}: {e}")
-            if not latest_price:
+            # Two outcome tokens share one WebSocket callback keyed only by
+            # slug, so the cached Signal 1 `latest_price` may reflect either
+            # token -- not necessarily token_ids[0], the one we're about to
+            # buy. Fetch that specific token's real current midpoint instead
+            # of trusting the cached (possibly wrong-outcome) price.
+            entry_price = fetch_midpoint(auto_sub.token_ids[0])
+            if entry_price is None:
                 return
             open_position(
-                db, combined_signal, asset_id=auto_sub.token_ids[0], entry_price=latest_price,
+                db, combined_signal, asset_id=auto_sub.token_ids[0], entry_price=entry_price,
                 alert_callback=lambda msg: send_telegram_alert(ADMIN_CHAT_ID, msg) if ADMIN_CHAT_ID else None,
             )
 

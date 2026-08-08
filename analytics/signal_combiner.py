@@ -155,15 +155,16 @@ def run_signal_combiner_cycle(
     try:
         active_rows = db.query(AutoSubscription).filter_by(status="active").all()
         for row in active_rows:
-            if not row.condition_id:
-                continue
             try:
+                if not row.condition_id:
+                    continue
                 has_position = open_position_fn(db, row.condition_id)
                 combined = build_combined_signal(db, redis_client, row, has_position)
                 if combined is None:
                     continue
                 summary["evaluated"] += 1
-                persist_signal(db, combined)
+                if combined.recommended_action != ACTION_IGNORE:
+                    persist_signal(db, combined)
                 if combined.recommended_action == ACTION_TRADE:
                     summary["trade_signals"] += 1
                     if on_trade_signal is not None:
