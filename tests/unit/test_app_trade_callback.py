@@ -14,6 +14,33 @@ sys.path.append(str(build_path))
 import app
 
 
+def test_send_telegram_alert_redacts_urls_in_error_log():
+    """Regression: this except block logged the raw exception unredacted.
+    python-telegram-bot wraps httpx transport failures with the full
+    request URL embedded (Telegram's Bot API puts the token in the URL
+    path, not a header), so a network-level failure here could leak the
+    live BOT_TOKEN into logs -- the same class of leak fixed separately
+    for httpx's own INFO-level request logging (db.py), just a different
+    call site that got missed.
+    """
+    class _FakeBot:
+        def __init__(self, token):
+            pass
+
+        async def send_message(self, chat_id, text):
+            raise RuntimeError("Failed for url: https://api.telegram.org/bot123456:FAKETOKEN/sendMessage")
+
+    with patch.object(app, "Bot", _FakeBot), \
+         patch.object(app, "BOT_TOKEN", "fake-token"), \
+         patch.object(app, "logger") as mock_logger:
+        app.send_telegram_alert("12345", "test message")
+
+    mock_logger.error.assert_called_once()
+    logged_message = mock_logger.error.call_args[0][0]
+    assert "FAKETOKEN" not in logged_message
+    assert "<redacted-url>" in logged_message
+
+
 class MockRedis:
     def __init__(self):
         self.store = {}

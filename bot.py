@@ -1,9 +1,18 @@
+import logging
 import os
 import httpx
 from dotenv import load_dotenv
 from typing import Final
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+# httpx logs full request URLs at INFO level, and Telegram's Bot API embeds
+# the bot token directly in the URL path (not a header) -- this is the same
+# leak fixed for the fastapi service's logging (see db.py); this process
+# runs independently and never imports db.py, so it needs the same explicit
+# suppression rather than inheriting it.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")

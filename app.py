@@ -20,6 +20,7 @@ from analytics.order_flow import append_trade, generate_signal_score, price_impa
 from core.global_ws_manager import GlobalWebSocketManager
 from core.auto_discovery import run_scheduler_loop
 from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop, run_score_recalculation_loop
+from blockchain.log_sanitizer import redact_urls
 from blockchain.polygon_sync import PolygonSyncService
 from analytics.signal_combiner import run_signal_combiner_loop
 from execution.paper_trader import fetch_midpoint, has_open_position, open_position, run_position_monitor_loop
@@ -149,7 +150,12 @@ def send_telegram_alert(chat_id: str, message: str):
         loop.run_until_complete(bot.send_message(chat_id=chat_id, text=message))
         loop.close()
     except Exception as e:
-        logger.error(f"Telegram dispatcher error context: {e}")
+        # Telegram's Bot API embeds the token in the URL path, not a
+        # header -- python-telegram-bot's httpx-transport failures embed
+        # the full request URL in their default string form, so logging
+        # {e} unredacted here could leak the live BOT_TOKEN the same way
+        # httpx's own INFO-level request logging did (see db.py).
+        logger.error(f"Telegram dispatcher error context: {redact_urls(e)}")
 
 def get_token_ids(slug: str):
     gamma_url = f"https://gamma-api.polymarket.com/events?slug={slug}"
