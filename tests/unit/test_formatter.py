@@ -12,7 +12,7 @@ from channel.formatter import contains_forbidden_language, format_free_alert, fo
 
 def _event(**overrides):
     defaults = dict(
-        market_id="0xabc", slug="test-market", question="Will X happen?",
+        market_id="0xabc", slug="test-market", question="Outcome of X?",
         category="politics", timestamp=time.time(), trigger="OFI_SPIKE",
         severity="MEDIUM", anomaly_score=0.65, current_price=0.42,
         price_change_pct=3.1, ofi_15min=0.61, volume_spike_ratio=1.2,
@@ -26,7 +26,7 @@ def _event(**overrides):
 
 def test_premium_alert_contains_core_fields():
     text = format_premium_alert(_event(), daily_volume=125_000.0)
-    assert "Will X happen?" in text
+    assert "Outcome of X?" in text
     assert "42% implied" in text
     assert "Market surveillance only. Not financial advice." in text
     assert "#politics" in text

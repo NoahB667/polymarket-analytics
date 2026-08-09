@@ -11,7 +11,7 @@ from models.orm import AnomalyEvent
 
 FORBIDDEN_WORDS = [
     "buy", "sell", "trade", "invest", "position", "recommend", "suggest",
-    "should", "predict", "profit", "gain", "opportunity", "edge", "signal",
+    "should", "predict", "profit", "gain", "opportunity", "edge", "signal", "will",
 ]
 
 DISCLAIMER = "Market surveillance only. Not financial advice."
