@@ -108,12 +108,10 @@ def _schedule_price_impact_checks(db: Any, event: AnomalyEvent, asset_id: str) -
     """HIGH/CRITICAL events get price-impact checks at every checkpoint
     (reference/signal_design.md). Best-effort -- never raises.
 
-    Uses flush(), not commit(): the caller (run_anomaly_engine_cycle) commits
-    exactly once after broadcast_fn has also run, so the still-uncommitted
-    AnomalyEvent row is never durably inserted before its final state (e.g.
-    posted_at_premium/posted_at_free set by broadcast_fn) is known -- that
-    would otherwise force a later UPDATE, violating the anomaly_event table's
-    append-only invariant (models/orm.py).
+    By the time this runs, `event` has already been committed by the caller
+    (run_anomaly_engine_cycle), so a rollback here can only affect the
+    PriceImpactCheck rows added in this function's own transaction -- it can
+    never revert `event` back to a transient state.
     """
     if event.severity not in HIGH_SEVERITIES:
         return
@@ -126,7 +124,7 @@ def _schedule_price_impact_checks(db: Any, event: AnomalyEvent, asset_id: str) -
                 direction="BUY", entry_price=event.current_price, entry_time=now,
                 checkpoint_interval=interval, target_check_time=now + offset,
             ))
-        db.flush()
+        db.commit()
     except Exception as e:
         db.rollback()
         logger.error(f"Anomaly engine: failed to schedule price impact checks for {event.slug}: {e}")
@@ -173,7 +171,12 @@ def run_anomaly_engine_cycle(
                     logger.error(f"Anomaly engine: broadcast failed for {event.slug}: {be}")
 
                 db.add(event)
-                db.flush()  # assigns event.id, single INSERT with final state
+                db.commit()  # commit immediately: event is already in its final
+                # state (broadcast_fn ran above), so this is a single INSERT
+                # that is never followed by an UPDATE. Committing here -- before
+                # _schedule_price_impact_checks runs -- makes the AnomalyEvent
+                # durable before anything else touches the session, so a
+                # rollback inside that function can never undo this event.
                 summary["generated"] += 1
 
                 try:
@@ -183,8 +186,6 @@ def run_anomaly_engine_cycle(
 
                 asset_id = (row.token_ids or [""])[0]
                 _schedule_price_impact_checks(db, event, asset_id)
-
-                db.commit()  # single commit -- event row is never touched again after its INSERT
             except Exception as e:
                 db.rollback()
                 logger.error(f"Anomaly engine: failed to evaluate {row.slug}: {e}")

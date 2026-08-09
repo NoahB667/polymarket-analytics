@@ -159,6 +159,47 @@ def test_broadcast_mutation_persists_without_update_after_insert():
     assert rows[0].posted_at_premium == mutated_ts
 
 
+def test_price_impact_check_failure_does_not_lose_anomaly_event():
+    """Regression test: if inserting PriceImpactCheck rows fails partway
+    through _schedule_price_impact_checks, that function's internal
+    db.rollback() must not undo the AnomalyEvent, which is committed on its
+    own (db.add(event); db.commit()) before price-impact scheduling ever
+    touches the session. Simulated here by making the PriceImpactCheck
+    constructor raise on its second call, which is caught and rolled back
+    inside _schedule_price_impact_checks -- the AnomalyEvent must still be
+    present in the DB afterward.
+    """
+    Session = _session_factory()
+    db = Session()
+    db.add(_auto_subscription())
+    db.commit()
+    redis_client = _fake_redis({"test-market": _strong_signal1()})
+    broadcast_fn = MagicMock()
+
+    call_count = {"n": 0}
+    real_price_impact_check = ae.PriceImpactCheck
+
+    def flaky_price_impact_check(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise RuntimeError("simulated insert failure")
+        return real_price_impact_check(*args, **kwargs)
+
+    with patch("analytics.anomaly_engine.PriceImpactCheck", side_effect=flaky_price_impact_check):
+        summary = ae.run_anomaly_engine_cycle(Session, redis_client, broadcast_fn)
+
+    assert summary["generated"] == 1
+
+    db2 = Session()
+    events = db2.query(AnomalyEvent).filter_by(slug="test-market").all()
+    assert len(events) == 1, "AnomalyEvent must survive a PriceImpactCheck insert failure"
+
+    # The price-impact-check scheduling itself was rolled back best-effort,
+    # so no partial PriceImpactCheck rows should have landed either.
+    checks = db2.query(PriceImpactCheck).all()
+    assert len(checks) == 0
+
+
 def test_high_or_critical_schedules_price_impact_checks():
     Session = _session_factory()
     db = Session()
