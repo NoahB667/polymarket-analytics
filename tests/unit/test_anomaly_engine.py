@@ -120,6 +120,45 @@ def test_cooldown_suppresses_repeat_non_critical_alert():
     assert summary["generated"] == 1
 
 
+def test_broadcast_mutation_persists_without_update_after_insert():
+    """Regression test: broadcast_fn mutates event.posted_at_premium in place
+    (as broadcaster.dispatch() does in production). run_anomaly_engine_cycle
+    must flush (not commit) before broadcast_fn runs and commit exactly once
+    afterward, so the row lands with its final state via a single INSERT --
+    never an UPDATE, which would violate anomaly_event's append-only
+    invariant (models/orm.py).
+    """
+    Session = _session_factory()
+    db = Session()
+    db.add(_auto_subscription())
+    db.commit()
+    redis_client = _fake_redis({"test-market": _strong_signal1()})
+
+    mutated_ts = time.time()
+
+    def broadcast_fn(db_arg, event):
+        event.posted_at_premium = mutated_ts
+
+    executed_statements = []
+    from sqlalchemy import event as sa_event
+
+    engine = Session.kw["bind"]
+
+    @sa_event.listens_for(engine, "before_cursor_execute")
+    def _capture(conn, cursor, statement, parameters, context, executemany):
+        executed_statements.append(statement)
+
+    summary = ae.run_anomaly_engine_cycle(Session, redis_client, broadcast_fn)
+
+    assert summary["generated"] == 1
+    assert not any(s.strip().upper().startswith("UPDATE") for s in executed_statements)
+
+    db2 = Session()
+    rows = db2.query(AnomalyEvent).all()
+    assert len(rows) == 1
+    assert rows[0].posted_at_premium == mutated_ts
+
+
 def test_high_or_critical_schedules_price_impact_checks():
     Session = _session_factory()
     db = Session()

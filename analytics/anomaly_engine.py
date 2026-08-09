@@ -107,6 +107,13 @@ def _cooldown_active(redis_client: Any, market_id: str) -> bool:
 def _schedule_price_impact_checks(db: Any, event: AnomalyEvent, asset_id: str) -> None:
     """HIGH/CRITICAL events get price-impact checks at every checkpoint
     (reference/signal_design.md). Best-effort -- never raises.
+
+    Uses flush(), not commit(): the caller (run_anomaly_engine_cycle) commits
+    exactly once after broadcast_fn has also run, so the still-uncommitted
+    AnomalyEvent row is never durably inserted before its final state (e.g.
+    posted_at_premium/posted_at_free set by broadcast_fn) is known -- that
+    would otherwise force a later UPDATE, violating the anomaly_event table's
+    append-only invariant (models/orm.py).
     """
     if event.severity not in HIGH_SEVERITIES:
         return
@@ -119,7 +126,7 @@ def _schedule_price_impact_checks(db: Any, event: AnomalyEvent, asset_id: str) -
                 direction="BUY", entry_price=event.current_price, entry_time=now,
                 checkpoint_interval=interval, target_check_time=now + offset,
             ))
-        db.commit()
+        db.flush()
     except Exception as e:
         db.rollback()
         logger.error(f"Anomaly engine: failed to schedule price impact checks for {event.slug}: {e}")
@@ -146,11 +153,27 @@ def run_anomaly_engine_cycle(
                     continue
                 summary["evaluated"] += 1
 
-                if event.severity != "CRITICAL" and _cooldown_active(redis_client, event.market_id):
+                if event.severity != SEVERITY_CRITICAL and _cooldown_active(redis_client, event.market_id):
                     continue
 
+                # broadcast_fn mutates event.posted_at_premium/posted_at_free
+                # in place (channel/broadcaster.py dispatch()). It MUST run
+                # before event is ever added to the session: once a row has
+                # been flushed, SQLAlchemy treats it as persistent and any
+                # later attribute change forces a real UPDATE statement on
+                # the next flush, no matter how commits are arranged --
+                # violating anomaly_event's append-only invariant
+                # (models/orm.py). A broadcast failure must not lose the
+                # event, so it's isolated in its own try/except (matches the
+                # best-effort discipline already used for the cooldown key
+                # and _schedule_price_impact_checks below).
+                try:
+                    broadcast_fn(db, event)
+                except Exception as be:
+                    logger.error(f"Anomaly engine: broadcast failed for {event.slug}: {be}")
+
                 db.add(event)
-                db.commit()
+                db.flush()  # assigns event.id, single INSERT with final state
                 summary["generated"] += 1
 
                 try:
@@ -161,8 +184,7 @@ def run_anomaly_engine_cycle(
                 asset_id = (row.token_ids or [""])[0]
                 _schedule_price_impact_checks(db, event, asset_id)
 
-                broadcast_fn(db, event)
-                db.commit()  # persists posted_at_premium/posted_at_free set by broadcast_fn
+                db.commit()  # single commit -- event row is never touched again after its INSERT
             except Exception as e:
                 db.rollback()
                 logger.error(f"Anomaly engine: failed to evaluate {row.slug}: {e}")
