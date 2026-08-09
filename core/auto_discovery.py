@@ -344,6 +344,16 @@ def run_discovery_cycle(
         now = time.time()
 
         applied_new = set()
+        # Preloaded so the loop below can tell "genuinely new slug" from "a
+        # slug that already has a row under some other status" without an
+        # N+1 query per candidate -- scoped to just this cycle's new_slugs,
+        # not a full-table scan.
+        existing_rows_by_new_slug = {
+            row.slug: row
+            for row in db.query(AutoSubscription)
+            .filter(AutoSubscription.slug.in_(diff["new_slugs"]))
+            .all()
+        } if diff["new_slugs"] else {}
         for slug in diff["new_slugs"]:
             try:
                 market = selected_by_slug[slug]
@@ -361,22 +371,52 @@ def run_discovery_cycle(
                 # succeeded, so DB state never claims a market is "active"
                 # when GlobalWebSocketManager never picked it up.
                 subscribe_callback(slug, token_ids)
-                db.add(AutoSubscription(
-                    slug=slug,
-                    question=market.get("question"),
-                    category=market.get("category"),
-                    condition_id=market_id,
-                    market_score=market["score"],
-                    tier=market["tier"],
-                    volume_24h=market.get("volume_24h"),
-                    days_remaining=market.get("days_remaining"),
-                    token_ids=token_ids,
-                    subscribed_at=now,
-                    last_seen_active=now,
-                    last_cycle_at=now,
-                    status="active",
-                    consecutive_misses=0,
-                ))
+                existing_row = existing_rows_by_new_slug.get(slug)
+                if existing_row is not None:
+                    # This slug already has a row (status="resolved" or
+                    # "dropped") -- diff_discovery_cycle only checks
+                    # currently-active slugs when computing new_slugs, so a
+                    # market that missed selection twice transiently and
+                    # then came back looks "new" to it. Reactivate the
+                    # existing row in place rather than INSERTing a
+                    # duplicate: a fresh INSERT collides with the slug
+                    # UNIQUE constraint on commit, which rolls back this
+                    # entire cycle's transaction -- discarding every other
+                    # legitimate update (other new markets, kept/missed
+                    # bookkeeping) made in the same cycle, even though the
+                    # cycle still logs as "complete". total_trades_collected
+                    # and subscribed_at (first-discovered timestamp) are
+                    # deliberately left untouched -- this is a reactivation,
+                    # not a fresh subscription.
+                    existing_row.question = market.get("question")
+                    existing_row.category = market.get("category")
+                    existing_row.condition_id = market_id
+                    existing_row.market_score = market["score"]
+                    existing_row.tier = market["tier"]
+                    existing_row.volume_24h = market.get("volume_24h")
+                    existing_row.days_remaining = market.get("days_remaining")
+                    existing_row.token_ids = token_ids
+                    existing_row.last_seen_active = now
+                    existing_row.last_cycle_at = now
+                    existing_row.status = "active"
+                    existing_row.consecutive_misses = 0
+                else:
+                    db.add(AutoSubscription(
+                        slug=slug,
+                        question=market.get("question"),
+                        category=market.get("category"),
+                        condition_id=market_id,
+                        market_score=market["score"],
+                        tier=market["tier"],
+                        volume_24h=market.get("volume_24h"),
+                        days_remaining=market.get("days_remaining"),
+                        token_ids=token_ids,
+                        subscribed_at=now,
+                        last_seen_active=now,
+                        last_cycle_at=now,
+                        status="active",
+                        consecutive_misses=0,
+                    ))
                 if redis_client is not None:
                     try:
                         if not market_id:

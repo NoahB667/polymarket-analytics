@@ -177,3 +177,62 @@ class PolygonSyncState(Base):
     last_block = Column(Integer, nullable=False)
     last_updated = Column(Float, nullable=False)
     events_processed = Column(Integer, default=0, nullable=False)
+
+
+class Signal(Base):
+    """Append-only log of every combined-signal evaluation (Step 10).
+
+    Never UPDATE or DELETE rows here -- backtesting integrity depends on
+    this table reflecting exactly what the live system decided at the time
+    (CLAUDE.md rule 4).
+    """
+
+    __tablename__ = "signal"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market_id = Column(String(100), nullable=False, index=True)
+    slug = Column(String(200), nullable=False, index=True)
+    timestamp = Column(Float, nullable=False, index=True)
+
+    direction = Column(String(10), nullable=False)  # "BUY" or "SELL"
+    signal1_confidence = Column(Float, nullable=False)
+    signal2_confidence = Column(Float, nullable=False)
+    signal2_market_insider_risk = Column(Float, nullable=False)
+    combined_score = Column(Float, nullable=False, index=True)
+    recommended_action = Column(String(10), nullable=False, index=True)  # TRADE/WATCH/IGNORE
+    gates_passed = Column(Boolean, nullable=False)
+
+
+class PaperPosition(Base):
+    """A simulated position opened/closed by the paper trader (Step 10).
+
+    Paper trading only -- never used to place a real order (CLAUDE.md rule 5).
+    """
+
+    __tablename__ = "paper_position"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market_id = Column(String(100), nullable=False, index=True)
+    slug = Column(String(200), nullable=False, index=True)
+    asset_id = Column(String(100), nullable=False)
+
+    direction = Column(String(10), nullable=False)  # "BUY" or "SELL"
+    entry_price = Column(Float, nullable=False)
+    shares = Column(Float, nullable=False)
+    cost = Column(Float, nullable=False)
+    entry_time = Column(Float, nullable=False, index=True)
+    signal_score = Column(Float, nullable=False)
+
+    stop_loss_price = Column(Float, nullable=False)
+    take_profit_price = Column(Float, nullable=False)
+
+    status = Column(String(20), nullable=False, default="open", index=True)  # "open" or "closed"
+    exit_price = Column(Float, nullable=True)
+    exit_time = Column(Float, nullable=True)
+    exit_reason = Column(String(20), nullable=True)  # STOP_LOSS/TAKE_PROFIT/RESOLUTION
+    pnl = Column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("idx_paper_position_status", "status"),
+        Index("idx_paper_position_market_status", "market_id", "status"),
+    )

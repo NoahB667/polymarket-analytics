@@ -120,7 +120,13 @@ def build_wallet_intelligence_query(
         "SELECT\n"
         "    upper(to_hex(t.tx_hash)) || '-' || CAST(t.evt_index AS VARCHAR) as blockchain_id,\n"
         "    t.maker as wallet_address,\n"
-        "    to_hex(t.condition_id) as market_id,\n"
+        # Normalized (lowercase, 0x-prefixed) to match AutoSubscription.condition_id's
+        # format (Gamma's) -- the WHERE clause below already lowercases+prefixes for
+        # its own IN-list comparison; this SELECTed value must match the same way,
+        # or the row's stored market_id can never match condition_id downstream in
+        # market_insider_risk/build_signal2_score's equality filter, nor
+        # MarketResolutionClient's CLOB lookup, even with real matching data present.
+        "    '0x' || lower(to_hex(t.condition_id)) as market_id,\n"
         "    t.event_market_name as event_market_name,\n"
         "    t.question,\n"
         "    t.token_outcome as outcome,\n"

@@ -67,6 +67,20 @@ def test_build_wallet_intelligence_query_includes_all_condition_ids():
     assert "t.action = 'CLOB trade'" in sql
 
 
+def test_build_wallet_intelligence_query_selects_normalized_market_id():
+    """Regression: the SELECTed market_id column must be normalized
+    (lowercase, 0x-prefixed) the same way the WHERE clause's id_list is --
+    otherwise the stored OnchainTrade.market_id (Dune's raw to_hex() output:
+    UPPERCASE, no 0x prefix) can never match AutoSubscription.condition_id
+    (Gamma's format: lowercase, 0x-prefixed) in market_insider_risk /
+    build_signal2_score's later `OnchainTrade.market_id == condition_id`
+    filter, nor MarketResolutionClient's CLOB lookup -- both silently find
+    zero rows forever, even with real matching on-chain data present.
+    """
+    sql = wis.build_wallet_intelligence_query(["0xABC123"], lookback_days=2, min_usd=100, row_limit=5000)
+    assert "'0x' || lower(to_hex(t.condition_id)) as market_id" in sql
+
+
 def test_run_wallet_intelligence_cycle_skips_when_no_condition_ids():
     session_factory = _sqlite_session_factory()
 

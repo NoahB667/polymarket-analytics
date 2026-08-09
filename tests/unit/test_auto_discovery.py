@@ -1,4 +1,5 @@
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -361,6 +362,69 @@ def test_run_discovery_cycle_subscribes_new_qualifying_market():
     db.close()
 
 
+def test_run_discovery_cycle_reactivates_previously_resolved_slug_instead_of_duplicate_insert():
+    """Regression: a market marked 'resolved' (e.g. it missed selection
+    twice transiently, per RESOLVED_MISS_THRESHOLD) that reappears as a
+    qualifying Gamma candidate must be reactivated in place, not
+    re-INSERTed. A fresh INSERT collides with the slug's unique constraint
+    on commit, which rolls back the ENTIRE cycle's transaction -- silently
+    discarding every other legitimate update (other new markets,
+    last_cycle_at/consecutive_misses refreshes for already-active markets)
+    made in that same cycle, even though the cycle logs as "complete".
+    """
+    original_subscribed_at = _time.time() - 100000
+    session_factory = _sqlite_session_factory()
+    db = session_factory()
+    db.add(AutoSubscription(
+        slug="us-china-tariffs-q3-2026", question="stale", category="economics",
+        market_score=0.5, tier=2, volume_24h=100.0, days_remaining=1.0,
+        token_ids=["stale_tok"], subscribed_at=original_subscribed_at,
+        last_seen_active=original_subscribed_at, last_cycle_at=original_subscribed_at,
+        status="resolved", consecutive_misses=2,
+    ))
+    # A second, genuinely-active market whose bookkeeping update must
+    # survive the cycle -- this is what proves the whole-cycle rollback is
+    # actually fixed, not just the collision itself.
+    db.add(AutoSubscription(
+        slug="already-active-market", question="Q", category="c",
+        market_score=0.9, tier=1, volume_24h=1000.0, days_remaining=10.0,
+        token_ids=["tok_x"], subscribed_at=_time.time() - 1000,
+        last_seen_active=_time.time() - 1000, last_cycle_at=_time.time() - 1000,
+        status="active", consecutive_misses=0,
+    ))
+    db.commit()
+    db.close()
+
+    subscribed = []
+    with patch.object(auto_discovery, "fetch_candidate_markets", return_value=[dict(_TARIFF_MARKET)]), \
+         patch.object(auto_discovery, "check_disk_usage", return_value={"used_pct": 10.0, "used_gb": 1.0, "total_gb": 100.0}):
+        auto_discovery.run_discovery_cycle(
+            subscribe_callback=lambda slug, tids: subscribed.append((slug, tids)),
+            unsubscribe_callback=lambda slug: None,
+            alert_callback=lambda msg: None,
+            session_factory=session_factory,
+        )
+
+    assert subscribed == [("us-china-tariffs-q3-2026", ["tok_1", "tok_2"])]
+
+    db = session_factory()
+    reactivated = db.query(AutoSubscription).filter_by(slug="us-china-tariffs-q3-2026").all()
+    assert len(reactivated) == 1  # never a duplicate row
+    row = reactivated[0]
+    assert row.status == "active"
+    assert row.token_ids == ["tok_1", "tok_2"]
+    assert row.consecutive_misses == 0
+    assert row.subscribed_at == original_subscribed_at  # first-discovery time preserved, not reset
+
+    # The unrelated already-active market wasn't in this cycle's candidates
+    # (fetch_candidate_markets only returned the tariff market), so it
+    # should have picked up a consecutive_misses bump -- proving this
+    # cycle's OTHER updates weren't discarded by the earlier collision.
+    other = db.query(AutoSubscription).filter_by(slug="already-active-market").first()
+    assert other.consecutive_misses == 1
+    db.close()
+
+
 def test_run_discovery_cycle_marks_resolved_after_two_consecutive_misses():
     session_factory = _sqlite_session_factory()
     db = session_factory()
@@ -475,12 +539,23 @@ def test_run_discovery_cycle_backfills_to_min_active_markets_when_disk_normal():
     tier1_market = dict(_TARIFF_MARKET)  # scores > 0.8
 
     # Category-relevant (economics) but scores well below AUTO_DISCOVERY_THRESHOLD
-    # (0.5): base 0.4 + tiny volume/time/spread bumps only.
+    # (0.5): base 0.4 + tiny volume/time/spread bumps only. Regression: a
+    # previous hardcoded endDate ("2026-08-10") drifted from "just under
+    # MIN_DAYS_REMAINING's 2-day floor" to "in the past" as real time
+    # passed, then a naive fix to a far-future date ("2099-01-01")
+    # accidentally pushed days_remaining into TIME_BRACKETS' 90+ day
+    # bracket (+0.20), crossing AUTO_DISCOVERY_THRESHOLD and making these
+    # markets qualify normally -- defeating the point of this test, which
+    # verifies the floor-backfill path specifically. A date relative to
+    # "now" (3 days out) keeps them permanently in the intended
+    # 2-to-7-day window (above MIN_DAYS_REMAINING's hard floor, below
+    # TIME_BRACKETS' first bonus bracket), immune to drift either way.
+    near_term_end_date = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     low_score_markets = []
     for i in range(3):
         m = {
             "question": f"Will some economic indicator {i} happen?", "category": "economics",
-            "volume24hr": "500", "endDate": "2026-08-10T00:00:00Z",
+            "volume24hr": "500", "endDate": near_term_end_date,
             "bestBid": "0.40", "bestAsk": "0.60", "outcomePrices": '["0.5", "0.5"]',
             "closed": False, "slug": f"low-score-econ-{i}", "token_ids": [f"tok_low_{i}"],
         }
@@ -512,7 +587,7 @@ def test_run_discovery_cycle_does_not_backfill_when_disk_not_normal():
     session_factory = _sqlite_session_factory()
     low_score_market = {
         "question": "Will some economic indicator happen?", "category": "economics",
-        "volume24hr": "500", "endDate": "2026-08-10T00:00:00Z",
+        "volume24hr": "500", "endDate": "2099-01-01T00:00:00Z",
         "bestBid": "0.40", "bestAsk": "0.60", "outcomePrices": '["0.5", "0.5"]',
         "closed": False, "slug": "low-score-econ", "token_ids": ["tok_low"],
     }

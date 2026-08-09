@@ -9,6 +9,19 @@ load_dotenv()
 
 logger = logging.getLogger("polymarket.api")
 
+# httpx (the Telegram bot client's HTTP library) logs full request URLs at
+# INFO level, and Telegram's Bot API embeds the bot token directly in the
+# URL path (https://api.telegram.org/bot<TOKEN>/sendMessage) rather than a
+# header -- confirmed live that this leaked a real BOT_TOKEN into container
+# logs on every Telegram API call. Set explicitly here (not via
+# logging.basicConfig) so it holds regardless of import order or what any
+# other module's basicConfig call configures for the root logger --
+# Logger.setLevel() on a specific logger always wins over an inherited root
+# level. db.py is imported early by every entry point (app.py, scripts),
+# so this takes effect before any Telegram/HTTP call can happen.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     logger.critical("DATABASE_URL environment variable is not set!")
@@ -60,6 +73,47 @@ def ensure_additive_columns() -> None:
                 conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_def}"))
         except Exception as e:
             logger.warning(f"Additive column migration failed (best-effort, continuing): {table_name}.{column_name}: {e}")
+
+
+def normalize_onchain_trade_market_ids() -> None:
+    """Best-effort idempotent data self-heal for existing OnchainTrade rows.
+
+    The Dune-based wallet-intelligence ingestion query used to SELECT
+    market_id as raw to_hex(condition_id) -- 64 uppercase hex characters,
+    no 0x prefix -- while AutoSubscription.condition_id (Gamma's format)
+    is lowercase and 0x-prefixed. That mismatch was fixed at the SELECT
+    level (core/wallet_intelligence_scheduler.py), which stops the
+    problem for new ingestions -- but rows already written before that
+    fix landed keep their old, un-normalized market_id forever: the
+    per-row backfill path in _ingest_rows only fires when a row's
+    category is NULL, and every row from a completed Dune ingestion
+    already has one set. Without this, market_insider_risk /
+    build_signal2_score's `OnchainTrade.market_id == condition_id` filter
+    keeps finding zero rows for exactly the historical data that
+    motivated the SELECT-level fix in the first place.
+
+    A plain UPDATE (not a per-row Python loop) since this can touch a
+    large number of rows in one pass; guarded to only match Dune's raw
+    format (64 hex chars, no 0x prefix) so it never touches the Polygon
+    live monitor's rows, which store a decimal ERC1155 token_id in this
+    same column (a different, unrelated placeholder format -- see
+    blockchain/polygon_sync.py's _process_batch). `NOT LIKE '0x%' AND
+    length(...) = 64` is deliberately portable SQL (no regex operator)
+    so this runs correctly on both SQLite (tests) and Postgres (prod).
+    The WHERE guard matches zero rows once fully normalized, so this is
+    cheap and safe to run unconditionally on every startup, matching
+    ensure_additive_columns' pattern.
+    """
+    try:
+        with engine.begin() as conn:
+            result = conn.execute(text(
+                "UPDATE onchain_trades SET market_id = '0x' || lower(market_id) "
+                "WHERE market_id NOT LIKE '0x%' AND length(market_id) = 64"
+            ))
+            if result.rowcount:
+                logger.info(f"Normalized market_id format for {result.rowcount} existing OnchainTrade row(s)")
+    except Exception as e:
+        logger.warning(f"OnchainTrade market_id normalization failed (best-effort, continuing): {e}")
 
 
 @contextmanager

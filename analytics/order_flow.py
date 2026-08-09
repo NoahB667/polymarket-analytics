@@ -77,6 +77,7 @@ def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
 
     result = _score_order_flow(ofi_1m, ofi_5m, ofi_15m, ofi_1h, volume_spike, latest_price)
     result["slug"] = slug
+    result["latest_price"] = latest_price
     result["updated_at"] = time.time()
     return result
 

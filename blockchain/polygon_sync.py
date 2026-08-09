@@ -23,13 +23,26 @@ from blockchain.event_decoder import blockchain_id, decode_log, is_taker_side, O
 from blockchain.log_sanitizer import redact_urls
 from blockchain.polygon_contracts import TAKER_ADDRESSES, ORDER_FILLED_TOPIC0_V1, ORDER_FILLED_TOPIC0_V2
 from blockchain.wallet_profiler import increment_wallet_counters
-from models.orm import OnchainTrade, PolygonSyncState
+from models.orm import AutoSubscription, OnchainTrade, PolygonSyncState
 
 logger = logging.getLogger("polymarket.blockchain.polygon_sync")
 
 DEFAULT_MAX_BLOCKS_PER_QUERY = int(os.getenv("POLYGON_MAX_BLOCKS_PER_QUERY", "1000"))
 DEFAULT_POLL_INTERVAL_SECONDS = float(os.getenv("POLYGON_POLL_INTERVAL_SECONDS", "2"))
 DEFAULT_MAX_CATCHUP_BLOCKS = int(os.getenv("POLYGON_MAX_CATCHUP_BLOCKS", "10000"))
+DEFAULT_RPC_TIMEOUT_SECONDS = float(os.getenv("POLYGON_RPC_TIMEOUT_SECONDS", "30"))
+# Regression: max_catchup_blocks bounds the block SPAN per cycle, but a
+# cycle's actual cost is (span / max_blocks_per_query) sequential
+# eth_getLogs calls. Once the block-range auto-shrink (see
+# _fetch_chunk_with_retry) correctly detects a provider's real per-call
+# limit -- confirmed live to be as low as 10 blocks on a free-tier plan --
+# a single "capped" 10,000-block cycle can balloon into ~1,000 sequential
+# RPC round-trips, recreating the exact unbroken-burst, never-idles
+# problem max_catchup_blocks was introduced to fix, just measured in
+# requests instead of blocks. This bounds the number of requests per
+# cycle directly, so cycle duration stays predictable regardless of how
+# small the provider's real limit turns out to be.
+DEFAULT_MAX_CHUNKS_PER_CYCLE = int(os.getenv("POLYGON_MAX_CHUNKS_PER_CYCLE", "30"))
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 5
 LAST_BLOCK_REDIS_KEY = "polygon:last_block"
@@ -55,7 +68,17 @@ class PolygonSyncService:
         self.max_blocks_per_query = DEFAULT_MAX_BLOCKS_PER_QUERY
         self.poll_interval_seconds = DEFAULT_POLL_INTERVAL_SECONDS
         self.max_catchup_blocks = DEFAULT_MAX_CATCHUP_BLOCKS
-        self._w3 = Web3(Web3.HTTPProvider(rpc_url))
+        self.max_chunks_per_cycle = DEFAULT_MAX_CHUNKS_PER_CYCLE
+        # Regression: with no timeout configured, web3.py's default HTTP
+        # client behavior left a slow/unresponsive RPC endpoint able to
+        # hang eth_blockNumber or eth_getLogs indefinitely -- no exception,
+        # no timeout, no progress, forever. Confirmed live: the sync thread
+        # got stuck on its very first RPC call and never logged another
+        # line for days, completely and silently disabling Polygon
+        # on-chain sync. An explicit timeout ensures a hung call
+        # eventually raises, which this module's existing try/except
+        # blocks already treat as a normal, retryable, non-fatal RPC error.
+        self._w3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": DEFAULT_RPC_TIMEOUT_SECONDS}))
         # Polygon is a PoA-style chain -- its block headers' extraData field
         # exceeds the 32 bytes web3.py's default block formatter expects,
         # raising ExtraDataLengthError on every eth_getBlock call (used
@@ -117,30 +140,66 @@ class PolygonSyncService:
                 continue
 
             if current_block > last_processed:
-                logs, last_successful_block = self._fetch_logs(last_processed + 1, current_block)
-                db = self.db_session_factory()
                 try:
-                    events_processed = self._process_batch(db, self._decode_logs(logs))
-                finally:
-                    db.close()
-                # Only advance past blocks eth_getLogs actually returned --
-                # if a chunk exhausted its retries (e.g. the RPC's real
-                # eth_getLogs range cap is far below max_blocks_per_query,
-                # observed live to be as low as 10 blocks on some plans vs.
-                # this project's 1000-block default), last_successful_block
-                # stops short of current_block so those blocks are retried
-                # next cycle instead of being silently skipped forever.
-                last_processed = last_successful_block
-                self._save_last_block(last_processed, events_processed)
-                self.metrics["last_synced_block"] = last_processed
-                # Reuses current_block fetched at the top of this iteration
-                # (line 112) rather than a second eth_blockNumber call --
-                # that second call was outside the try/except above, so an
-                # RPC blip here would raise uncaught out of _sync_loop and
-                # silently kill the daemon thread for good (no restart, no
-                # retry), contradicting every other RPC call in this module
-                # being treated as non-fatal.
-                self.metrics["blocks_behind"] = max(0, current_block - last_processed)
+                    # Capped at max_catchup_blocks per cycle -- previously
+                    # this passed the raw current_block (the full,
+                    # unbounded chain tip) every iteration. On a large
+                    # backlog with a short poll_interval_seconds, that
+                    # meant every cycle attempted hundreds of sequential
+                    # eth_getLogs calls in one unbroken burst, pinning the
+                    # sync thread's CPU continuously since new blocks kept
+                    # arriving faster than one thread could plow through
+                    # the backlog sequentially. Bounding to_block here
+                    # makes each cycle do fixed, predictable work, so the
+                    # thread actually idles for poll_interval_seconds
+                    # between cycles while still making steady forward
+                    # progress.
+                    #
+                    # Also capped at max_blocks_per_query * max_chunks_per_cycle
+                    # -- max_catchup_blocks alone bounds the block SPAN, but a
+                    # cycle's actual cost is (span / max_blocks_per_query)
+                    # sequential eth_getLogs calls. Once the block-range
+                    # auto-shrink correctly detects a provider's real
+                    # per-call limit (confirmed live: as low as 10 blocks on
+                    # a free-tier plan), a "capped" 10,000-block cycle can
+                    # balloon into ~1,000 sequential RPC round-trips --
+                    # recreating the same unbroken-burst problem this cap
+                    # was introduced to fix, just measured in requests
+                    # instead of blocks. Whichever bound is smaller wins.
+                    request_bounded_blocks = self.max_blocks_per_query * self.max_chunks_per_cycle
+                    to_block = min(current_block, last_processed + min(self.max_catchup_blocks, request_bounded_blocks))
+                    logs, last_successful_block = self._fetch_logs(last_processed + 1, to_block)
+                    db = self.db_session_factory()
+                    try:
+                        events_processed = self._process_batch(db, self._decode_logs(logs))
+                    finally:
+                        db.close()
+                    # Only advance past blocks eth_getLogs actually
+                    # returned -- if a chunk exhausted its retries (e.g.
+                    # the RPC's real eth_getLogs range cap is far below
+                    # max_blocks_per_query, observed live to be as low as
+                    # 10 blocks on some plans vs. this project's
+                    # 1000-block default), last_successful_block stops
+                    # short of current_block so those blocks are retried
+                    # next cycle instead of being silently skipped forever.
+                    last_processed = last_successful_block
+                    self._save_last_block(last_processed, events_processed)
+                    self.metrics["last_synced_block"] = last_processed
+                    self.metrics["blocks_behind"] = max(0, current_block - last_processed)
+                except Exception as e:
+                    # Regression: this whole block used to run unguarded --
+                    # _fetch_logs and everything after it sat outside any
+                    # try/except in this loop. Confirmed live: the sync
+                    # thread died silently days ago and never logged a
+                    # single error afterward, because whatever exception
+                    # killed it propagated straight out of _sync_loop with
+                    # nothing to catch it. Matches this module's existing
+                    # non-fatal-RPC-error philosophy (see the
+                    # eth_blockNumber try/except above): log and retry next
+                    # cycle instead of letting one bad cycle permanently
+                    # kill the daemon thread with no restart and no retry.
+                    self.metrics["rpc_errors_total"] += 1
+                    logger.error(f"Polygon sync: cycle failed, will retry next interval: {redact_urls(e)}")
 
             self._stop_event.wait(self.poll_interval_seconds)
 
@@ -222,7 +281,18 @@ class PolygonSyncService:
                 return self._w3.eth.get_logs(filter_params), True
             except Exception as e:
                 self.metrics["rpc_errors_total"] += 1
-                message = str(e).lower()
+                # Regression: confirmed live against a real Free-tier
+                # Alchemy endpoint that a block-range-too-large rejection
+                # arrives as a plain requests.HTTPError whose str() is
+                # just "400 Client Error: Bad Request for url: ..." -- the
+                # actual detail ("...up to a 10 block range...") lives
+                # only in the response body. Checking str(e) alone missed
+                # every real occurrence of this error: max_blocks_per_query
+                # never shrank below the provider's real limit, so every
+                # retry kept requesting a range that was always rejected,
+                # making zero forward progress indefinitely.
+                response_text = getattr(getattr(e, "response", None), "text", "") or ""
+                message = (str(e) + " " + response_text).lower()
                 if "block range" in message:
                     self.max_blocks_per_query = max(1, self.max_blocks_per_query // 2)
                     logger.warning(f"Polygon sync: block range too large, reduced chunk to {self.max_blocks_per_query}")
@@ -230,19 +300,35 @@ class PolygonSyncService:
                 elif "rate limit" in message:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                 else:
-                    logger.error(f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): {redact_urls(e)}")
+                    logger.error(
+                        f"Polygon sync: eth_getLogs failed ({from_block}-{to_block}): "
+                        f"{redact_urls(e)} | response: {redact_urls(response_text)[:500]}"
+                    )
                     time.sleep(RETRY_DELAY_SECONDS)
         logger.error(f"Polygon sync: eth_getLogs failed after {MAX_RETRIES} retries, skipping {from_block}-{to_block}")
         return [], False
 
     def _process_batch(self, db: Any, events: List[OrderFilledEvent]) -> int:
-        """Filters to taker-side events, dedupes, writes OnchainTrade rows,
-        and bumps wallet counters. Best-effort: one bad event is logged and
-        skipped, never aborts the batch.
+        """Filters to taker-side events, dedupes, writes OnchainTrade rows
+        for every market (not just currently-tracked ones -- wallet
+        scoring in compile_profile deliberately looks at a wallet's
+        *entire* cross-market history, e.g. category_concentration and
+        unique_markets, so narrowing what gets captured would bias every
+        wallet's profile, not just cut storage waste), and bumps wallet
+        counters (the expensive per-event work: a DB write plus marking
+        the wallet score_stale for the next full rescore) only for
+        markets currently tracked by auto-discovery -- there's no value
+        in immediately re-scoring a wallet purely because it traded on a
+        market nothing here cares about (e.g. sports) when it could just
+        as easily be scored on its next trade in a market that matters.
+        Best-effort: one bad event is logged and skipped, never aborts
+        the batch.
 
         Returns:
-            Count of events successfully processed.
+            Count of events successfully processed (stored), regardless
+            of whether the wallet-counter bump also happened.
         """
+        tracked_token_ids = self._get_tracked_token_ids(db)
         processed = 0
         for event in events:
             if not is_taker_side(event):
@@ -260,25 +346,77 @@ class PolygonSyncService:
                     entry_price=event.implied_price,
                     block_timestamp=event.block_timestamp,
                 ))
-                # Deliberately NO commit here -- the OnchainTrade insert and
-                # the wallet counter bump must land in ONE transaction
-                # (increment_wallet_counters issues the commit covering
-                # both). Committing the trade first meant that if the
-                # counter bump then raised, the rollback could only undo the
-                # counter work: the trade row survived, so the dedup check
-                # above would `continue` past it on every future run and the
-                # counter bump would be lost permanently -- silently
-                # understating total_trades/long_shot_attempts and leaving
-                # score_stale unset, corrupting insider_score's inputs with
-                # no error trace after the fact.
-                increment_wallet_counters(db, event)
+                # Only bump wallet counters (the expensive, optional work)
+                # for a market we can positively confirm is tracked --
+                # both an empty tracked set (nothing tracked yet, e.g. the
+                # cold-start window before auto-discovery's first cycle
+                # has committed anything) and a failed lookup (None) mean
+                # "we don't know", and the conservative default is to skip
+                # the extra work rather than guess. Unlike the OnchainTrade
+                # row itself, this is not a permanent-loss risk: the trade
+                # is still captured, so a future trade on a confirmed
+                # tracked market (or a periodic full rescore) can still
+                # mark this wallet score_stale later.
+                if tracked_token_ids and event.token_id in tracked_token_ids:
+                    # Deliberately NO commit here -- the OnchainTrade
+                    # insert and the wallet counter bump must land in ONE
+                    # transaction (increment_wallet_counters issues the
+                    # commit covering both). Committing the trade first
+                    # meant that if the counter bump then raised, the
+                    # rollback could only undo the counter work: the trade
+                    # row survived, so the dedup check above would
+                    # `continue` past it on every future run and the
+                    # counter bump would be lost permanently -- silently
+                    # understating total_trades/long_shot_attempts and
+                    # leaving score_stale unset, corrupting insider_score's
+                    # inputs with no error trace after the fact.
+                    increment_wallet_counters(db, event)
+                    self.metrics["wallet_profiles_updated_total"] += 1
+                else:
+                    db.commit()
                 processed += 1
                 self.metrics["events_processed_total"] += 1
-                self.metrics["wallet_profiles_updated_total"] += 1
             except Exception as e:
                 db.rollback()
                 logger.error(f"Polygon sync: failed to process event tx={event.tx_hash}: {redact_urls(e)}")
         return processed
+
+    def _get_tracked_token_ids(self, db: Any) -> Optional[set]:
+        """CLOB token ids for every currently active auto-tracked market.
+
+        Used only to decide whether _process_batch's per-event wallet
+        counter bump (extra, optional work) is worth doing -- NOT to
+        decide whether to store the OnchainTrade row itself, which always
+        happens regardless (wallet scoring reads a wallet's entire
+        cross-market history, so narrowing what gets *captured* would
+        bias every wallet's profile, not just cut waste). Getting this
+        wrong is therefore low-stakes, unlike the storage decision: a
+        wallet that doesn't get its counters bumped this cycle can still
+        get them bumped on a later confirmed-tracked trade, or via a
+        periodic full rescore -- nothing is permanently lost.
+
+        Returns:
+            The set of tracked token ids -- empty if the query succeeded
+            but legitimately found no active markets yet (e.g. the
+            cold-start window before auto-discovery's first cycle has
+            committed anything) -- or None if the lookup itself failed.
+            Callers should treat both empty and None the same way: skip
+            the counter bump rather than guess at tracked status.
+        """
+        try:
+            tracked: set = set()
+            rows = db.query(AutoSubscription.token_ids).filter_by(status="active").all()
+            for (token_ids,) in rows:
+                if token_ids:
+                    tracked.update(token_ids)
+            if not tracked:
+                logger.warning("Polygon sync: no active tracked markets found, skipping wallet-counter bumps this batch")
+            return tracked
+        except Exception as e:
+            logger.warning(
+                f"Polygon sync: failed to load tracked token_ids, skipping wallet-counter bumps this batch: {redact_urls(e)}"
+            )
+            return None
 
     def _get_last_block(self) -> Optional[int]:
         try:
