@@ -51,6 +51,7 @@ class PriceImpactCheck(Base):
     slug = Column(String, nullable=False, index=True)
     market_id = Column(String, nullable=False)
     asset_id = Column(String, nullable=False)
+    anomaly_event_id = Column(Integer, nullable=True, index=True)
 
     direction = Column(String, nullable=False)  # "BUY" or "SELL"
     entry_price = Column(Float, nullable=False)
@@ -66,6 +67,51 @@ class PriceImpactCheck(Base):
     check_price = Column(Float, nullable=True)
     price_change_pct = Column(Float, nullable=True)
     is_completed = Column(Boolean, default=False, nullable=False, index=True)
+
+
+class AnomalyEvent(Base):
+    """Append-only log of every generated AnomalyEvent (surveillance product).
+
+    Never UPDATE or DELETE rows here (PROJECT_CONTEXT.md rule 5) -- every
+    detected anomaly is stored permanently for private analysis, same
+    append-only discipline as the `signal` table.
+    """
+
+    __tablename__ = "anomaly_event"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market_id = Column(String(100), nullable=False, index=True)
+    slug = Column(String(200), nullable=False, index=True)
+    question = Column(String(500))
+    category = Column(String(500))
+    timestamp = Column(Float, nullable=False, index=True)
+
+    trigger = Column(String(30), nullable=False)
+    severity = Column(String(10), nullable=False, index=True)
+    anomaly_score = Column(Float, nullable=False)
+
+    current_price = Column(Float, nullable=False)
+    price_change_pct = Column(Float, nullable=False)
+    ofi_15min = Column(Float, nullable=False)
+    volume_spike_ratio = Column(Float, nullable=False)
+    is_long_shot = Column(Boolean, nullable=False)
+    buy_pressure_pct = Column(Float, nullable=False)
+
+    anomalous_wallet_count = Column(Integer, nullable=False, default=0)
+    market_insider_risk = Column(Float, nullable=False, default=0.0)
+    wallet_context_available = Column(Boolean, nullable=False, default=False)
+
+    broadcast_free = Column(Boolean, nullable=False, default=False)
+    broadcast_premium = Column(Boolean, nullable=False, default=False)
+    broadcast_reason = Column(String(300), nullable=False, default="")
+
+    posted_at_premium = Column(Float, nullable=True)
+    posted_at_free = Column(Float, nullable=True)
+
+    __table_args__ = (
+        Index("idx_anomaly_event_market_timestamp", "market_id", "timestamp"),
+        Index("idx_anomaly_event_severity", "severity"),
+    )
 
 
 class OnchainTrade(Base):
