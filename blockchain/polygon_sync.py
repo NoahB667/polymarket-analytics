@@ -414,7 +414,7 @@ class PolygonSyncService:
             return tracked
         except Exception as e:
             logger.warning(
-                f"Polygon sync: failed to load tracked token_ids, processing unfiltered this batch: {redact_urls(e)}"
+                f"Polygon sync: failed to load tracked token_ids, skipping wallet-counter bumps this batch: {redact_urls(e)}"
             )
             return None
 
