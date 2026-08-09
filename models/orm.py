@@ -106,6 +106,17 @@ class AnomalyEvent(Base):
     broadcast_reason = Column(String(300), nullable=False, default="")
 
     posted_at_premium = Column(Float, nullable=True)
+    # Known limitation: NOT currently populated. Unlike posted_at_premium
+    # (set synchronously by channel/broadcaster.py's dispatch() before the
+    # event is ever added to the session), the free-channel post fires on
+    # a separate thread via channel/alert_queue.AlertQueue, delayed by
+    # FREE_CHANNEL_DELAY_SECONDS (60s+) after the row has already been
+    # committed and its session closed. There is no legal way to write
+    # this column back at that point: it isn't in the session anymore, and
+    # anomaly_event is append-only (see class docstring / Architecture
+    # Rule 6), so a later UPDATE isn't an option either. Reserved for
+    # future use if a persistence mechanism for post-commit async state is
+    # added; nothing currently reads this field.
     posted_at_free = Column(Float, nullable=True)
 
     __table_args__ = (
