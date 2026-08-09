@@ -67,6 +67,26 @@ def calculate_volume_spike(slug: str, redis_client) -> float:
         pass
     return 1.0
 
+def calculate_price_change_pct(slug: str, window_minutes: int = 20) -> float:
+    """Percent price change over the trailing window_minutes, from the
+    per-slug in-memory trade deque (reference/PROJECT_CONTEXT.md AnomalyEvent
+    "price_change_pct" field: "price change in last 20 minutes").
+    """
+    with lock:
+        if slug not in market_windows or not market_windows[slug]:
+            return 0.0
+        trades = market_windows[slug]
+        latest_price = trades[-1]["price"]
+        start_time = time.time() - (window_minutes * 60)
+        window_open_price = latest_price
+        for trade in trades:
+            if trade["timestamp"] >= start_time:
+                window_open_price = trade["price"]
+                break
+        if window_open_price == 0.0:
+            return 0.0
+        return round((latest_price - window_open_price) / window_open_price * 100.0, 2)
+
 def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
     ofi_1m = calculate_ofi(slug, window_minutes=1)
     ofi_5m = calculate_ofi(slug, window_minutes=5)
