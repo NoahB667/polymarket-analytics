@@ -496,10 +496,18 @@ async def lifespan(app: FastAPI):
 
     # 11. Start the alert queue worker thread -- drains the delayed
     # free-channel queue (reference/mvp_product.md: 60s lag behind premium).
+    if not PREMIUM_CHANNEL_ID or not FREE_CHANNEL_ID:
+        logger.warning(
+            "Anomaly broadcaster: PREMIUM_CHANNEL_ID and/or FREE_CHANNEL_ID "
+            "is unset -- send_telegram_alert will silently no-op for the "
+            "unconfigured channel(s), so AnomalyEvents will be generated "
+            "but never posted to Telegram."
+        )
+
     global _alert_queue_started
     if not _alert_queue_started:
-        def _dispatch_free_alert(event: AnomalyEvent) -> None:
-            dispatch_free(event, send_fn=send_telegram_alert, free_channel_id=FREE_CHANNEL_ID)
+        def _dispatch_free_alert(payload: Dict[str, str]) -> None:
+            dispatch_free(payload, send_fn=send_telegram_alert)
 
         threading.Thread(
             target=alert_queue.run_worker,

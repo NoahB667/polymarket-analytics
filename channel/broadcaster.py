@@ -6,8 +6,9 @@ always lags premium by at least delay_seconds.
 
 import logging
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Dict
 
+from blockchain.log_sanitizer import redact_urls
 from channel.alert_queue import AlertQueue
 from channel.formatter import format_free_alert, format_premium_alert
 from models.orm import AnomalyEvent
@@ -31,6 +32,20 @@ def dispatch(
     -- the caller (analytics/anomaly_engine.py) is responsible for
     persisting that back to the DB, matching the append-only AnomalyEvent
     row's "populated after posting" fields.
+
+    The free-channel message is rendered here, eagerly, while `event` is
+    still a live, attribute-readable object -- this function runs before
+    the caller ever calls db.add(event)/db.commit() (see
+    analytics/anomaly_engine.py's run_anomaly_engine_cycle). Only a plain
+    dict payload (chat_id/message/slug) is put on the AlertQueue, never
+    the ORM instance itself: by the time the AlertQueue worker thread
+    fires (delay_seconds later, on its own thread), the session that
+    produced `event` has long since committed and closed, and with this
+    project's expire_on_commit=True SessionLocal default, any attribute
+    access on a detached `event` at that point would raise
+    DetachedInstanceError. There is therefore no way to set
+    event.posted_at_free from the delayed path -- see the posted_at_free
+    column comment in models/orm.py.
     """
     if event.broadcast_premium:
         try:
@@ -38,21 +53,32 @@ def dispatch(
             send_fn(premium_channel_id, message)
             event.posted_at_premium = time.time()
         except Exception as e:
-            logger.error(f"Broadcaster: premium post failed for {event.slug}: {e}")
+            logger.error(f"Broadcaster: premium post failed for {event.slug}: {redact_urls(e)}")
 
     if event.broadcast_free:
-        alert_queue.enqueue(event, ready_at=time.time() + delay_seconds)
+        payload = {
+            "chat_id": free_channel_id,
+            "message": format_free_alert(event),
+            "slug": event.slug,
+        }
+        alert_queue.enqueue(payload, ready_at=time.time() + delay_seconds)
 
 
 def dispatch_free(
-    event: AnomalyEvent,
+    payload: Dict[str, str],
     send_fn: Callable[[str, str], None],
-    free_channel_id: str,
 ) -> None:
-    """The AlertQueue worker's dispatch_fn -- posts the delayed free alert."""
+    """The AlertQueue worker's dispatch_fn -- posts the delayed free alert.
+
+    Takes a plain dict payload (chat_id/message/slug) rather than the
+    AnomalyEvent ORM object -- see dispatch()'s docstring for why: by the
+    time this runs, the session that produced the original event has been
+    closed and any attribute access on it would raise
+    DetachedInstanceError. Because there is no ORM object here, this
+    function cannot set posted_at_free (see models/orm.py's
+    posted_at_free column comment for the resulting limitation).
+    """
     try:
-        message = format_free_alert(event)
-        send_fn(free_channel_id, message)
-        event.posted_at_free = time.time()
+        send_fn(payload["chat_id"], payload["message"])
     except Exception as e:
-        logger.error(f"Broadcaster: free post failed for {event.slug}: {e}")
+        logger.error(f"Broadcaster: free post failed for {payload.get('slug')}: {redact_urls(e)}")

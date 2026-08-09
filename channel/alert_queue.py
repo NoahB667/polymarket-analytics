@@ -12,11 +12,19 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
+from blockchain.log_sanitizer import redact_urls
+
 logger = logging.getLogger("polymarket.channel.alert_queue")
 
 
 class AlertQueue:
-    """A min-heap of (ready_at, sequence, event) tuples, thread-safe."""
+    """A min-heap of (ready_at, sequence, payload) tuples, thread-safe.
+
+    Generic over payload type -- `payload` can be any object accepted by
+    the dispatch_fn passed to run_worker(). channel/broadcaster.py's
+    dispatch() enqueues a plain dict (chat_id/message/slug), not an ORM
+    object, so this class holds no assumptions about SQLAlchemy sessions.
+    """
 
     def __init__(self) -> None:
         self._heap: list = []
@@ -24,6 +32,14 @@ class AlertQueue:
         self._counter = 0
 
     def enqueue(self, event: Any, ready_at: float) -> None:
+        """Schedules `event` (any payload) for dispatch once ready_at passes.
+
+        Args:
+            event: The payload to hand to run_worker()'s dispatch_fn once
+                ready. Not necessarily an ORM object -- see class docstring.
+            ready_at: Unix timestamp (time.time()) after which this payload
+                becomes eligible for dispatch.
+        """
         with self._lock:
             heapq.heappush(self._heap, (ready_at, self._counter, event))
             self._counter += 1
@@ -53,5 +69,5 @@ class AlertQueue:
                 try:
                     dispatch_fn(event)
                 except Exception as e:
-                    logger.error(f"Alert queue: dispatch failed, continuing: {e}")
+                    logger.error(f"Alert queue: dispatch failed, continuing: {redact_urls(e)}")
             stop_event.wait(poll_interval)
