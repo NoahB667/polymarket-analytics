@@ -23,9 +23,15 @@ def contains_forbidden_language(text: str) -> List[str]:
     return [word for word in FORBIDDEN_WORDS if re.search(rf"\b{re.escape(word)}\b", lowered)]
 
 
-def _hashtag(category: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "", (category or "market").lower())
-    return f"#{slug or 'market'}"
+def _hashtags(category: str) -> str:
+    tags = [
+        re.sub(r"[^a-z0-9]+", "", tag.lower())
+        for tag in (category or "").split(",")
+    ]
+    tags = [tag for tag in tags if tag]
+    if not tags:
+        tags = ["market"]
+    return " ".join(f"#{tag}" for tag in tags)
 
 
 def _time_ago(timestamp: float) -> str:
@@ -62,7 +68,7 @@ def format_premium_alert(event: AnomalyEvent, daily_volume: float = 0.0) -> str:
         f"Total market volume today: ${daily_volume:,.0f}",
         "",
         DISCLAIMER,
-        f"{_hashtag(event.category)}",
+        _hashtags(event.category),
     ]
     return "\n".join(lines)
 
