@@ -15,7 +15,7 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from analytics.order_flow import calculate_price_change_pct
+from analytics.order_flow import calculate_price_change_pct, calculate_volume_24h_baseline
 from analytics.signal_combiner import read_signal1
 from blockchain.wallet_profiler import build_signal2_score
 from models.orm import AnomalyEvent, AutoSubscription, PriceImpactCheck
@@ -39,6 +39,20 @@ PRICE_IMPACT_CHECKPOINTS = [
 HIGH_SEVERITIES = {"HIGH", SEVERITY_CRITICAL}
 
 
+def _refresh_volume_24h_baseline(db: Any, redis_client: Any, slug: str) -> None:
+    """Keeps meta:volume_24h_avg:{slug} fresh in Redis -- the hot-path
+    calculate_volume_spike() (analytics/order_flow.py) only ever reads this
+    key, it never computes it. Best-effort: a DB or Redis failure here must
+    not stop this market's evaluation.
+    """
+    try:
+        baseline = calculate_volume_24h_baseline(db, slug)
+        if baseline > 0:
+            redis_client.setex(f"meta:volume_24h_avg:{slug}", 86400, baseline)
+    except Exception as e:
+        logger.error(f"Anomaly engine: failed to refresh volume baseline for {slug}: {e}")
+
+
 def build_anomaly_event(
     db: Any,
     redis_client: Any,
@@ -47,6 +61,8 @@ def build_anomaly_event(
     """Evaluates one market and returns an unsaved AnomalyEvent, or None if
     no trigger condition fired (see evaluate_anomaly's contract).
     """
+    _refresh_volume_24h_baseline(db, redis_client, auto_subscription.slug)
+
     signal1 = read_signal1(redis_client, auto_subscription.slug)
     if signal1 is None:
         return None

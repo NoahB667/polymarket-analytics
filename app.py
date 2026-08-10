@@ -16,7 +16,7 @@ from db import engine, SessionLocal, get_db_session, logger, ensure_additive_col
 
 from models.orm import Base, PriceImpactCheck, Subscription, Trade, Signal, PaperPosition, AutoSubscription, AnomalyEvent
 from websocket_order_book import WebSocketOrderBook
-from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
+from analytics.order_flow import append_trade, calculate_daily_volume, generate_signal_score, price_impact_evaluator_worker
 from core.global_ws_manager import GlobalWebSocketManager
 from core.auto_discovery import run_scheduler_loop
 from core.wallet_intelligence_scheduler import run_wallet_intelligence_loop, run_score_recalculation_loop
@@ -529,6 +529,7 @@ async def lifespan(app: FastAPI):
                 premium_channel_id=PREMIUM_CHANNEL_ID,
                 free_channel_id=FREE_CHANNEL_ID,
                 delay_seconds=FREE_CHANNEL_DELAY_SECONDS,
+                daily_volume=calculate_daily_volume(db, event.slug),
             )
 
         threading.Thread(

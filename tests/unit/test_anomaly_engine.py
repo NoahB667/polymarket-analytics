@@ -12,7 +12,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from db import Base
 from models.dataclasses import Signal2Score
-from models.orm import AnomalyEvent, AutoSubscription, PriceImpactCheck
+from models.orm import AnomalyEvent, AutoSubscription, PriceImpactCheck, Trade
 
 import analytics.anomaly_engine as ae
 
@@ -215,3 +215,39 @@ def test_high_or_critical_schedules_price_impact_checks():
     assert len(checks) == 5  # 5m, 15m, 1h, 4h, 24h
     assert {c.checkpoint_interval for c in checks} == {"5m", "15m", "1h", "4h", "24h"}
     assert all(c.anomaly_event_id is not None for c in checks)
+
+
+def test_build_anomaly_event_refreshes_volume_24h_baseline_in_redis():
+    """Regression: calculate_volume_spike() (analytics/order_flow.py) reads
+    meta:volume_24h_avg:{slug} from Redis on every trade, but nothing wrote
+    that key in production -- every alert reported a flat 1.0x spike ratio.
+    build_anomaly_event runs on the anomaly engine's periodic thread with a
+    DB session, so it's responsible for keeping that baseline fresh.
+    """
+    Session = _session_factory()
+    db = Session()
+    db.add(_auto_subscription())
+    now = time.time()
+    db.add(Trade(slug="test-market", usd=2400.0, timestamp=now - 3600))
+    db.commit()
+    redis_client = _fake_redis({"test-market": _strong_signal1()})
+
+    ae.build_anomaly_event(db, redis_client, db.query(AutoSubscription).one())
+
+    redis_client.setex.assert_any_call("meta:volume_24h_avg:test-market", 86400, 100.0)
+
+
+def test_build_anomaly_event_skips_baseline_write_with_no_trades():
+    Session = _session_factory()
+    db = Session()
+    db.add(_auto_subscription())
+    db.commit()
+    redis_client = _fake_redis({"test-market": _strong_signal1()})
+
+    ae.build_anomaly_event(db, redis_client, db.query(AutoSubscription).one())
+
+    baseline_calls = [
+        c for c in redis_client.setex.call_args_list
+        if c.args[0] == "meta:volume_24h_avg:test-market"
+    ]
+    assert baseline_calls == []

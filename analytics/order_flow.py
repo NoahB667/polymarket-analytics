@@ -4,9 +4,10 @@ import collections
 from typing import *
 
 import requests
+from sqlalchemy import func
 
 from db import get_db_session
-from models.orm import PriceImpactCheck
+from models.orm import PriceImpactCheck, Trade
 try:
     from signal_core.order_flow import generate_signal_score as _score_order_flow
 except ImportError as e:
@@ -86,6 +87,30 @@ def calculate_price_change_pct(slug: str, window_minutes: int = 20) -> float:
         if window_open_price == 0.0:
             return 0.0
         return round((latest_price - window_open_price) / window_open_price * 100.0, 2)
+
+def calculate_daily_volume(db, slug: str) -> float:
+    """Total USD volume traded on `slug` since the start of the current UTC
+    day (reference/PROJECT_CONTEXT.md AnomalyEvent alert "Total market
+    volume today" field).
+    """
+    day_start = (int(time.time() // 86400)) * 86400
+    total = db.query(func.sum(Trade.usd)).filter(
+        Trade.slug == slug, Trade.timestamp >= day_start
+    ).scalar()
+    return float(total or 0.0)
+
+
+def calculate_volume_24h_baseline(db, slug: str) -> float:
+    """Average hourly USD volume for `slug` over the trailing 24 hours --
+    the baseline calculate_volume_spike() compares current_1h_volume
+    against (reference/signal_design.md "Volume Spike Ratio").
+    """
+    window_start = time.time() - 86400
+    total = db.query(func.sum(Trade.usd)).filter(
+        Trade.slug == slug, Trade.timestamp >= window_start
+    ).scalar()
+    return float(total or 0.0) / 24.0
+
 
 def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
     ofi_1m = calculate_ofi(slug, window_minutes=1)

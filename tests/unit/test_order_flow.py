@@ -9,14 +9,28 @@ root_path = Path(__file__).resolve().parents[2]
 if str(root_path) not in sys.path:
     sys.path.insert(0, str(root_path))
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from db import Base
+from models.orm import Trade
+
 from analytics.order_flow import (
     append_trade,
+    calculate_daily_volume,
     calculate_ofi,
     calculate_price_change_pct,
+    calculate_volume_24h_baseline,
     generate_signal_score,
     price_impact_evaluator_worker,
     market_windows
 )
+
+
+def _session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(bind=engine)()
 
 @pytest.fixture(autouse=True)
 def run_before_and_after_tests():
@@ -171,3 +185,40 @@ def test_calculate_price_change_pct_over_window():
 def test_calculate_price_change_pct_no_trades_returns_zero():
     market_windows.pop("empty-market", None)
     assert calculate_price_change_pct("empty-market", window_minutes=20) == 0.0
+
+
+def test_calculate_daily_volume_sums_only_todays_trades_for_slug():
+    db = _session_factory()
+    now = time.time()
+    day_start = (int(now // 86400)) * 86400
+
+    db.add(Trade(slug="test-market", usd=100.0, timestamp=day_start + 10))
+    db.add(Trade(slug="test-market", usd=250.0, timestamp=now))
+    db.add(Trade(slug="test-market", usd=9999.0, timestamp=day_start - 10))  # yesterday, excluded
+    db.add(Trade(slug="other-market", usd=500.0, timestamp=now))  # different market, excluded
+    db.commit()
+
+    assert calculate_daily_volume(db, "test-market") == 350.0
+
+
+def test_calculate_daily_volume_no_trades_returns_zero():
+    db = _session_factory()
+    assert calculate_daily_volume(db, "no-trades-market") == 0.0
+
+
+def test_calculate_volume_24h_baseline_averages_trailing_24h_volume_by_hour():
+    db = _session_factory()
+    now = time.time()
+
+    db.add(Trade(slug="test-market", usd=2400.0, timestamp=now - 3600))
+    db.add(Trade(slug="test-market", usd=1200.0, timestamp=now - 23 * 3600))
+    db.add(Trade(slug="test-market", usd=999.0, timestamp=now - 25 * 3600))  # outside 24h, excluded
+    db.commit()
+
+    # (2400 + 1200) / 24 = 150.0
+    assert calculate_volume_24h_baseline(db, "test-market") == 150.0
+
+
+def test_calculate_volume_24h_baseline_no_trades_returns_zero():
+    db = _session_factory()
+    assert calculate_volume_24h_baseline(db, "no-trades-market") == 0.0
