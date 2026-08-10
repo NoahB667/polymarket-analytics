@@ -69,21 +69,44 @@ def calculate_volume_usd(slug: str, window_minutes: int) -> float:
         return total
 
 
+def calculate_volume_1h_usd(slug: str) -> float:
+    """Total USD volume (both sides) traded on `slug` in the trailing hour.
+    append_trade already evicts anything older than 60 minutes, so summing
+    the whole in-memory window is exactly the trailing-1h USD total.
+    """
+    with lock:
+        if slug not in market_windows:
+            return 0.0
+        return sum(float(trade.get("usd", 0.0)) for trade in market_windows[slug])
+
+
+def read_volume_24h_baseline(slug: str, redis_client) -> float:
+    """Average hourly USD volume for `slug`, cached in Redis by the anomaly
+    engine's periodic baseline refresh (analytics/anomaly_engine.py). 0.0 if
+    unknown -- callers must treat that as "no baseline available", not
+    "the market has zero typical volume".
+    """
+    try:
+        baseline_bytes = redis_client.get(f"meta:volume_24h_avg:{slug}")
+        if baseline_bytes:
+            return float(baseline_bytes)
+    except Exception:
+        pass
+    return 0.0
+
+
 def calculate_volume_spike(slug: str, redis_client) -> float:
     with lock:
         if slug not in market_windows or not market_windows[slug]:
             return 1.0 # Return neutral ratio if no trades exist
-        # 1. Sum up every trade size in our 60-minute memory buffer
-        current_1h_volume = sum(float(trade.get("size", 0.0)) for trade in market_windows[slug])
-    # 2. Network I/O to Redis happens OUTSIDE the thread lock
-    try:
-        baseline_bytes = redis_client.get(f"meta:volume_24h_avg:{slug}")
-        if baseline_bytes:
-            baseline_24h = float(baseline_bytes)
-            if baseline_24h > 0:
-                return current_1h_volume / baseline_24h
-    except Exception as e:
-        pass
+    # Network I/O to Redis happens OUTSIDE the thread lock.
+    # USD, not raw trade size -- shares/contracts aren't comparable to a
+    # dollar-denominated baseline, and the mismatch is worst on extreme-
+    # priced markets where 1 share is nowhere near $1.
+    current_1h_volume = calculate_volume_1h_usd(slug)
+    baseline_24h = read_volume_24h_baseline(slug, redis_client)
+    if baseline_24h > 0:
+        return current_1h_volume / baseline_24h
     return 1.0
 
 def calculate_price_change_pct(slug: str, window_minutes: int = 20) -> float:
@@ -143,6 +166,8 @@ def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
     result["latest_price"] = latest_price
     result["updated_at"] = time.time()
     result["volume_15m_usd"] = calculate_volume_usd(slug, window_minutes=15)
+    result["volume_1h_usd"] = calculate_volume_1h_usd(slug)
+    result["baseline_hourly_usd"] = read_volume_24h_baseline(slug, redis_client)
     return result
 
 def price_impact_evaluator_worker():

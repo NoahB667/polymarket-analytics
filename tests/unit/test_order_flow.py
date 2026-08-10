@@ -20,10 +20,13 @@ from analytics.order_flow import (
     calculate_daily_volume,
     calculate_ofi,
     calculate_price_change_pct,
+    calculate_volume_1h_usd,
     calculate_volume_24h_baseline,
+    calculate_volume_spike,
     calculate_volume_usd,
     generate_signal_score,
     price_impact_evaluator_worker,
+    read_volume_24h_baseline,
     market_windows
 )
 
@@ -250,3 +253,61 @@ def test_generate_signal_score_includes_volume_15m_usd():
     result = generate_signal_score(slug, latest_price=0.5, redis_client=None)
 
     assert result["volume_15m_usd"] == 250.0
+
+
+def test_calculate_volume_1h_usd_sums_usd_not_size():
+    """Regression: calculate_volume_spike used to sum raw trade `size`
+    (shares/contracts) as the current-1h volume, then divide it by a
+    dollar-denominated 24h baseline -- shares and dollars are not
+    comparable, and the mismatch is worst on extreme-priced markets where
+    1 share is nowhere near $1 (e.g. a $0.01 long-shot market).
+    """
+    slug = "volume-1h-usd-test-market"
+    market_windows.pop(slug, None)
+    # 1000 shares at $0.01 = $10 in USD, nothing like the raw share count.
+    append_trade(slug, {"price": 0.01, "size": 1000.0, "usd": 10.0, "side": "BUY", "timestamp": time.time()})
+
+    assert calculate_volume_1h_usd(slug) == 10.0
+
+
+def test_calculate_volume_1h_usd_no_trades_returns_zero():
+    market_windows.pop("empty-1h-volume-market", None)
+    assert calculate_volume_1h_usd("empty-1h-volume-market") == 0.0
+
+
+def test_read_volume_24h_baseline_returns_cached_value():
+    fake_redis = MagicMock()
+    fake_redis.get.return_value = b"400.0"
+    assert read_volume_24h_baseline("some-slug", fake_redis) == 400.0
+
+
+def test_read_volume_24h_baseline_missing_key_returns_zero():
+    fake_redis = MagicMock()
+    fake_redis.get.return_value = None
+    assert read_volume_24h_baseline("some-slug", fake_redis) == 0.0
+
+
+def test_calculate_volume_spike_uses_usd_not_size():
+    slug = "volume-spike-usd-test-market"
+    market_windows.pop(slug, None)
+    # 1000 shares at $0.01 = $10 USD current-1h volume.
+    append_trade(slug, {"price": 0.01, "size": 1000.0, "usd": 10.0, "side": "BUY", "timestamp": time.time()})
+    fake_redis = MagicMock()
+    fake_redis.get.return_value = b"5.0"  # $5/hr baseline
+
+    # $10 current / $5 baseline = 2.0x -- would be wildly different (200x)
+    # if the buggy version summed the 1000-share size instead of $10 usd.
+    assert calculate_volume_spike(slug, fake_redis) == 2.0
+
+
+def test_generate_signal_score_includes_volume_1h_usd_and_baseline():
+    slug = "signal-score-baseline-test"
+    market_windows.pop(slug, None)
+    append_trade(slug, {"price": 0.5, "size": 100.0, "usd": 250.0, "side": "BUY", "timestamp": time.time()})
+    fake_redis = MagicMock()
+    fake_redis.get.return_value = b"1000.0"
+
+    result = generate_signal_score(slug, latest_price=0.5, redis_client=fake_redis)
+
+    assert result["volume_1h_usd"] == 250.0
+    assert result["baseline_hourly_usd"] == 1000.0
