@@ -12,6 +12,7 @@ if str(root_path) not in sys.path:
 from analytics.order_flow import (
     append_trade,
     calculate_ofi,
+    calculate_price_change_pct,
     generate_signal_score,
     price_impact_evaluator_worker,
     market_windows
@@ -150,3 +151,23 @@ def test_full_order_flow_pipeline_integration(mock_redis):
     assert queued_payload["slug"] == slug
     assert queued_payload["price"] == 0.60
     assert queued_payload["side"] == "BUY"
+
+
+def test_calculate_price_change_pct_over_window():
+    slug = "price-change-test-market"
+    market_windows.pop(slug, None)
+    now = time.time()
+    append_trade(slug, {"price": 0.40, "size": 10.0, "side": "BUY", "timestamp": now - 25 * 60})
+    append_trade(slug, {"price": 0.50, "size": 10.0, "side": "BUY", "timestamp": now - 10 * 60})
+    append_trade(slug, {"price": 0.55, "size": 10.0, "side": "BUY", "timestamp": now})
+
+    result = calculate_price_change_pct(slug, window_minutes=20)
+
+    # Oldest trade inside the 20-min window is the one at -10min (price 0.50);
+    # the -25min trade fell outside the window. (0.55 - 0.50) / 0.50 * 100 = 10.0
+    assert result == 10.0
+
+
+def test_calculate_price_change_pct_no_trades_returns_zero():
+    market_windows.pop("empty-market", None)
+    assert calculate_price_change_pct("empty-market", window_minutes=20) == 0.0

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from redis_config import r
 from db import engine, SessionLocal, get_db_session, logger, ensure_additive_columns, normalize_onchain_trade_market_ids
 
-from models.orm import Base, PriceImpactCheck, Subscription, Trade, Signal, PaperPosition, AutoSubscription
+from models.orm import Base, PriceImpactCheck, Subscription, Trade, Signal, PaperPosition, AutoSubscription, AnomalyEvent
 from websocket_order_book import WebSocketOrderBook
 from analytics.order_flow import append_trade, generate_signal_score, price_impact_evaluator_worker
 from core.global_ws_manager import GlobalWebSocketManager
@@ -25,6 +25,9 @@ from blockchain.polygon_sync import PolygonSyncService
 from analytics.signal_combiner import run_signal_combiner_loop
 from execution.paper_trader import fetch_midpoint, has_open_position, open_position, run_position_monitor_loop
 from models.dataclasses import CombinedSignal
+from channel.alert_queue import AlertQueue
+from channel.broadcaster import dispatch as broadcast_dispatch, dispatch_free
+from analytics.anomaly_engine import run_anomaly_engine_loop
 
 
 load_dotenv()
@@ -33,6 +36,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
 SIGNAL_COMBINER_INTERVAL_SECONDS = float(os.getenv("SIGNAL_COMBINER_INTERVAL_SECONDS", "60"))
 POSITION_MONITOR_INTERVAL_SECONDS = float(os.getenv("POSITION_MONITOR_INTERVAL_SECONDS", "60"))
+ANOMALY_ENGINE_INTERVAL_SECONDS = float(os.getenv("ANOMALY_ENGINE_INTERVAL_SECONDS", "60"))
+PREMIUM_CHANNEL_ID = os.getenv("PREMIUM_CHANNEL_ID")
+FREE_CHANNEL_ID = os.getenv("FREE_CHANNEL_ID")
+FREE_CHANNEL_DELAY_SECONDS = float(os.getenv("FREE_CHANNEL_DELAY_SECONDS", "60"))
 
 # Active C++ Core Streams
 market_streams: Dict[str, WebSocketOrderBook] = {}
@@ -49,6 +56,9 @@ _polygon_sync_started = False
 _score_recalculation_started = False
 _signal_combiner_started = False
 _position_monitor_started = False
+_anomaly_engine_started = False
+_alert_queue_started = False
+alert_queue = AlertQueue()
 polygon_sync_service: Optional[PolygonSyncService] = None
 
 def db_writer_worker():
@@ -483,6 +493,55 @@ async def lifespan(app: FastAPI):
             daemon=True,
         ).start()
         _position_monitor_started = True
+
+    # 11. Start the alert queue worker thread -- drains the delayed
+    # free-channel queue (reference/mvp_product.md: 60s lag behind premium).
+    if not PREMIUM_CHANNEL_ID or not FREE_CHANNEL_ID:
+        logger.warning(
+            "Anomaly broadcaster: PREMIUM_CHANNEL_ID and/or FREE_CHANNEL_ID "
+            "is unset -- send_telegram_alert will silently no-op for the "
+            "unconfigured channel(s), so AnomalyEvents will be generated "
+            "but never posted to Telegram."
+        )
+
+    global _alert_queue_started
+    if not _alert_queue_started:
+        def _dispatch_free_alert(payload: Dict[str, str]) -> None:
+            dispatch_free(payload, send_fn=send_telegram_alert)
+
+        threading.Thread(
+            target=alert_queue.run_worker,
+            kwargs={"dispatch_fn": _dispatch_free_alert},
+            daemon=True,
+        ).start()
+        _alert_queue_started = True
+
+    # 12. Start the anomaly engine thread -- combines Signal 1 + Signal 2
+    # into AnomalyEvents and broadcasts them to the Telegram channels
+    # (reference/signal_design.md "AnomalyEvent Generation").
+    global _anomaly_engine_started
+    if not _anomaly_engine_started:
+        def _broadcast_anomaly_event(db: Any, event: AnomalyEvent) -> None:
+            broadcast_dispatch(
+                event,
+                send_fn=send_telegram_alert,
+                alert_queue=alert_queue,
+                premium_channel_id=PREMIUM_CHANNEL_ID,
+                free_channel_id=FREE_CHANNEL_ID,
+                delay_seconds=FREE_CHANNEL_DELAY_SECONDS,
+            )
+
+        threading.Thread(
+            target=run_anomaly_engine_loop,
+            kwargs={
+                "session_factory": SessionLocal,
+                "redis_client": r,
+                "broadcast_fn": _broadcast_anomaly_event,
+                "interval_seconds": ANOMALY_ENGINE_INTERVAL_SECONDS,
+            },
+            daemon=True,
+        ).start()
+        _anomaly_engine_started = True
 
     # Sync state tables non-blockingly on startup
     db = SessionLocal()

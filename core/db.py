@@ -62,6 +62,7 @@ def ensure_additive_columns() -> None:
     """
     migrations = [
         ("wallet_profiles", "score_stale", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ("price_impact_checks", "anomaly_event_id", "INTEGER"),
     ]
     inspector = inspect(engine)
     for table_name, column_name, column_def in migrations:
