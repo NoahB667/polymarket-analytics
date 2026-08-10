@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from queue import Queue
@@ -12,6 +13,7 @@ build_path = root_path / "cpp" / "build"
 sys.path.append(str(build_path))
 
 import app
+from analytics.order_flow import market_windows
 
 
 def test_send_telegram_alert_redacts_urls_in_error_log():
@@ -47,6 +49,9 @@ class MockRedis:
 
     def setex(self, key, ttl, value):
         self.store[key] = value
+
+    def get(self, key):
+        return self.store.get(key)
 
     def hgetall(self, key):
         return self.store.get(key, {})
@@ -119,6 +124,82 @@ def test_build_trade_callback_still_alerts_when_subscriber_exists():
 
     mock_alert.assert_called_once()
     assert mock_alert.call_args[0][0] == "555"
+
+
+def test_build_trade_callback_filters_out_non_primary_outcome_trades():
+    """Regression: a market's YES and NO outcome tokens both stream through
+    the same slug-keyed callback. Without filtering by primary_asset_id, a
+    trade on the complementary (non-tracked) outcome corrupts the shared
+    OFI/price-history window -- since the two tokens' prices are
+    complementary (~sum to $1) and their trade sides are economically
+    opposite, this can produce implausible price swings and OFI readings
+    that don't match the real price direction.
+    """
+    slug = "multi-outcome-slug"
+    market_windows.pop(slug, None)
+    fake_redis = MockRedis()
+    test_queue = Queue()
+
+    with patch.object(app, "r", fake_redis), \
+         patch.object(app, "trade_write_queue", test_queue), \
+         patch.object(app, "send_telegram_alert"):
+        callback = app.build_trade_callback(slug, primary_asset_id="tok-yes")
+
+        callback({
+            "slug": slug, "market": "0xmarket", "asset_id": "tok-yes",
+            "price": 0.20, "size": 100.0, "usd": 20.0, "side": "BUY",
+            "question": "Will X happen?", "outcome": "Yes",
+            "text": "BUY @ 0.20", "raw": {"event_type": "last_trade_price"},
+        })
+        callback({
+            "slug": slug, "market": "0xmarket", "asset_id": "tok-no",
+            "price": 0.80, "size": 100.0, "usd": 80.0, "side": "BUY",
+            "question": "Will X happen?", "outcome": "No",
+            "text": "BUY @ 0.80", "raw": {"event_type": "last_trade_price"},
+        })
+
+    # Only the tracked (YES) token's trade should have entered the OFI window.
+    assert len(market_windows[slug]) == 1
+    assert market_windows[slug][0]["price"] == 0.20
+
+    cached_signal = json.loads(fake_redis.store[f"signal:1:score:{slug}"])
+    assert cached_signal["latest_price"] == 0.20
+
+    # Both trades still get persisted to Postgres regardless of outcome.
+    raw_trade_payloads = [
+        p for p in list(test_queue.queue) if p["task_type"] == "RAW_TRADE"
+    ]
+    assert len(raw_trade_payloads) == 2
+
+
+def test_build_trade_callback_without_primary_asset_id_processes_all_trades():
+    """Backward compatibility: callers that don't know the primary outcome
+    token yet (primary_asset_id=None) keep today's behavior rather than
+    silently going blind on a market.
+    """
+    slug = "unknown-primary-slug"
+    market_windows.pop(slug, None)
+    fake_redis = MockRedis()
+    test_queue = Queue()
+
+    with patch.object(app, "r", fake_redis), \
+         patch.object(app, "trade_write_queue", test_queue), \
+         patch.object(app, "send_telegram_alert"):
+        callback = app.build_trade_callback(slug)
+        callback({
+            "slug": slug, "market": "0xmarket", "asset_id": "tok-yes",
+            "price": 0.20, "size": 100.0, "usd": 20.0, "side": "BUY",
+            "question": "Will X happen?", "outcome": "Yes",
+            "text": "BUY @ 0.20", "raw": {"event_type": "last_trade_price"},
+        })
+        callback({
+            "slug": slug, "market": "0xmarket", "asset_id": "tok-no",
+            "price": 0.80, "size": 100.0, "usd": 80.0, "side": "BUY",
+            "question": "Will X happen?", "outcome": "No",
+            "text": "BUY @ 0.80", "raw": {"event_type": "last_trade_price"},
+        })
+
+    assert len(market_windows[slug]) == 2
 
 
 def test_ensure_auto_market_stream_registers_on_global_manager():

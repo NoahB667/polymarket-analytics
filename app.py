@@ -200,7 +200,7 @@ def get_token_ids(slug: str):
     except Exception as e:
         return None, str(e)
 
-def build_trade_callback(slug: str):
+def build_trade_callback(slug: str, primary_asset_id: Optional[str] = None):
     """Builds the hot-path trade callback for a given market slug.
 
     Used by both the legacy per-market WebSocketOrderBook flow (user
@@ -210,6 +210,18 @@ def build_trade_callback(slug: str):
     Telegram alerts gated on Redis subscribers -- which are always empty
     for auto-tracked markets, so alerts are a no-op there with zero extra
     logic needed.
+
+    primary_asset_id: the market's tracked outcome token (callers pass
+    token_ids[0]). A market's YES and NO tokens both stream through this
+    same slug-keyed callback -- since their prices are complementary and
+    trade sides are economically opposite, feeding both into the shared
+    OFI/price-history window in analytics/order_flow.py produces
+    implausible price swings and OFI readings that don't match the real
+    price direction. When primary_asset_id is set, only trades on that
+    token update the OFI window and cached Signal1 score; other steps
+    (DB persistence, price-impact checks, Telegram alerts) still run for
+    every trade regardless of outcome. Left as None (process every trade,
+    today's behavior) when the caller doesn't know the primary token.
     """
     def on_trade_dispatched(details: dict):
         """
@@ -223,6 +235,7 @@ def build_trade_callback(slug: str):
         usd = float(details.get("usd", 0.0))
         side = details.get("side", "BUY")
         trade_slug = details.get("slug", slug) # Fallback to context slug if needed
+        asset_id = details.get("asset_id")
 
         # Pack a localized dictionary for our rolling memory windows
         trade_payload = {
@@ -233,22 +246,26 @@ def build_trade_callback(slug: str):
             "timestamp": time.time()
         }
 
-        # 1. Update In-Memory Order Flow Sliding Windows
-        append_trade(trade_slug, trade_payload)
+        is_primary_outcome = primary_asset_id is None or asset_id == primary_asset_id
 
-        # 2. Re-evaluate real-time signal metrics across all 4 timeframes
-        signal_data = generate_signal_score(trade_slug, price, r)
+        signal_data = None
+        if is_primary_outcome:
+            # 1. Update In-Memory Order Flow Sliding Windows
+            append_trade(trade_slug, trade_payload)
 
-        # 3. Cache the live Signal1Score inside Redis with a 5-minute TTL
-        try:
-            r.setex(f"signal:1:score:{trade_slug}", 300, json.dumps(signal_data))
-        except Exception as re:
-            logger.error(f"Redis signal caching failure for {trade_slug}: {re}")
+            # 2. Re-evaluate real-time signal metrics across all 4 timeframes
+            signal_data = generate_signal_score(trade_slug, price, r)
+
+            # 3. Cache the live Signal1Score inside Redis with a 5-minute TTL
+            try:
+                r.setex(f"signal:1:score:{trade_slug}", 300, json.dumps(signal_data))
+            except Exception as re:
+                logger.error(f"Redis signal caching failure for {trade_slug}: {re}")
 
         SIGNAL_THRESHOLD = 0.85
         EVALUATION_DELAY_SECONDS = 300
 
-        if abs(signal_data["score"]) >= SIGNAL_THRESHOLD:
+        if signal_data is not None and abs(signal_data["score"]) >= SIGNAL_THRESHOLD:
             try:
                 trade_write_queue.put_nowait({
                     "task_type": "PRICE_IMPACT_CHECK",
@@ -312,7 +329,9 @@ def ensure_market_stream(slug: str) -> tuple[bool, str]:
     if error:
         return False, error
 
-    on_trade_dispatched = build_trade_callback(slug)
+    on_trade_dispatched = build_trade_callback(
+        slug, primary_asset_id=assets_ids[0] if assets_ids else None
+    )
 
     url = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
@@ -350,7 +369,10 @@ global_ws_manager = GlobalWebSocketManager(
 
 def ensure_auto_market_stream(slug: str, token_ids: list) -> None:
     """Registers an auto-discovered market on the shared WebSocket connection."""
-    global_ws_manager.add_market(slug, token_ids, build_trade_callback(slug))
+    global_ws_manager.add_market(
+        slug, token_ids,
+        build_trade_callback(slug, primary_asset_id=token_ids[0] if token_ids else None),
+    )
 
 
 @asynccontextmanager
