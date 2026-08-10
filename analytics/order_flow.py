@@ -51,6 +51,24 @@ def calculate_ofi(slug: str, window_minutes: int) -> float:
             return 0.0
         return (buy_volume - sell_volume) / total_volume
 
+def calculate_volume_usd(slug: str, window_minutes: int) -> float:
+    """Total USD volume (both sides) traded on `slug` in the trailing
+    window_minutes -- lets signal_core gate OFI readings on real dollar
+    volume instead of firing on a single trade in a thin market.
+    """
+    with lock:
+        if slug not in market_windows:
+            return 0.0
+        trades = market_windows[slug]
+        start_time = time.time() - (window_minutes * 60)
+        total = 0.0
+        for trade in reversed(trades):
+            if trade["timestamp"] < start_time:
+                break
+            total += float(trade.get("usd", 0.0))
+        return total
+
+
 def calculate_volume_spike(slug: str, redis_client) -> float:
     with lock:
         if slug not in market_windows or not market_windows[slug]:
@@ -124,6 +142,7 @@ def generate_signal_score(slug: str, latest_price: float, redis_client) -> dict:
     result["slug"] = slug
     result["latest_price"] = latest_price
     result["updated_at"] = time.time()
+    result["volume_15m_usd"] = calculate_volume_usd(slug, window_minutes=15)
     return result
 
 def price_impact_evaluator_worker():

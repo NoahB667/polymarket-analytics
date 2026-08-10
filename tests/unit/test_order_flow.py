@@ -21,6 +21,7 @@ from analytics.order_flow import (
     calculate_ofi,
     calculate_price_change_pct,
     calculate_volume_24h_baseline,
+    calculate_volume_usd,
     generate_signal_score,
     price_impact_evaluator_worker,
     market_windows
@@ -222,3 +223,30 @@ def test_calculate_volume_24h_baseline_averages_trailing_24h_volume_by_hour():
 def test_calculate_volume_24h_baseline_no_trades_returns_zero():
     db = _session_factory()
     assert calculate_volume_24h_baseline(db, "no-trades-market") == 0.0
+
+
+def test_calculate_volume_usd_sums_trades_in_window_regardless_of_side():
+    slug = "volume-usd-test-market"
+    market_windows.pop(slug, None)
+    now = time.time()
+
+    append_trade(slug, {"usd": 999.0, "side": "BUY", "timestamp": now - 20 * 60})  # outside window
+    append_trade(slug, {"usd": 50.0, "side": "SELL", "timestamp": now - 5 * 60})
+    append_trade(slug, {"usd": 100.0, "side": "BUY", "timestamp": now})
+
+    assert calculate_volume_usd(slug, window_minutes=15) == 150.0
+
+
+def test_calculate_volume_usd_no_trades_returns_zero():
+    market_windows.pop("empty-volume-market", None)
+    assert calculate_volume_usd("empty-volume-market", window_minutes=15) == 0.0
+
+
+def test_generate_signal_score_includes_volume_15m_usd():
+    slug = "signal-score-volume-test"
+    market_windows.pop(slug, None)
+    append_trade(slug, {"price": 0.5, "size": 100.0, "usd": 250.0, "side": "BUY", "timestamp": time.time()})
+
+    result = generate_signal_score(slug, latest_price=0.5, redis_client=None)
+
+    assert result["volume_15m_usd"] == 250.0

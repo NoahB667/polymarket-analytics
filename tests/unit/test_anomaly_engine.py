@@ -54,6 +54,7 @@ def _strong_signal1(direction="BUY"):
         "confidence": 0.9,
         "direction": direction,
         "volume_spike_ratio": 6.0,
+        "volume_15m_usd": 1000.0,
         "long_shot_triggered": True,
         "slug": "test-market",
         "latest_price": 0.2,

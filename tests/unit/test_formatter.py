@@ -56,6 +56,20 @@ def test_free_alert_has_no_ofi_numbers_or_wallet_context():
     assert "Market surveillance only. Not financial advice." in text
 
 
+def test_premium_alert_says_above_when_volume_spike_ratio_over_one():
+    text = format_premium_alert(_event(volume_spike_ratio=2.4))
+    assert "2.4x above this market's 24h average" in text
+
+
+def test_premium_alert_does_not_say_above_when_volume_spike_ratio_under_one():
+    """Regression: a ratio below 1.0 means volume is BELOW the market's 24h
+    average, not above it -- the copy previously always said "above"
+    regardless of the actual ratio."""
+    text = format_premium_alert(_event(volume_spike_ratio=0.1))
+    assert "above" not in text.lower()
+    assert "0.1x" in text
+
+
 def test_no_forbidden_language_in_either_template():
     premium = format_premium_alert(_event(
         wallet_context_available=True, anomalous_wallet_count=2, is_long_shot=True, current_price=0.2,

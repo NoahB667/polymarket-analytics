@@ -43,6 +43,12 @@ def _time_ago(timestamp: float) -> str:
     return f"{minutes} minutes ago"
 
 
+def _volume_spike_line(volume_spike_ratio: float) -> str:
+    if volume_spike_ratio > 1.0:
+        return f"- Volume {volume_spike_ratio:.1f}x above this market's 24h average"
+    return f"- Volume at {volume_spike_ratio:.1f}x of this market's 24h average"
+
+
 def format_premium_alert(event: AnomalyEvent, daily_volume: float = 0.0) -> str:
     """Full-context alert for the premium channel."""
     lines = [
@@ -53,7 +59,7 @@ def format_premium_alert(event: AnomalyEvent, daily_volume: float = 0.0) -> str:
         "",
         "What we're observing:",
         f"- {event.buy_pressure_pct:.0f}% of volume one-directional (last 15min)",
-        f"- Volume {event.volume_spike_ratio:.1f}x above this market's 24h average",
+        _volume_spike_line(event.volume_spike_ratio),
     ]
     if event.is_long_shot:
         lines.append(f"- Long-shot territory -- {event.current_price * 100:.0f}% implied probability")
